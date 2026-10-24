@@ -23,9 +23,9 @@ class EventLog:
         self._next_id = max([e.get("id", 0) for e in self._events] + [0]) + 1
         self._limit = limit
 
-    def add(self, kind, **data):
+    def add(self, event_type, **data):
         with self._lock:
-            event = {"id": self._next_id, "type": kind, "time": round(time.time(), 3)}
+            event = {"id": self._next_id, "type": event_type, "time": round(time.time(), 3)}
             event.update(data)
             self._next_id += 1
             self._events.append(event)
