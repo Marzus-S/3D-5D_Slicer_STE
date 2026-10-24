@@ -549,7 +549,11 @@
     api("/api/config").then(function (cfg) {
       $("cfg-url").value = cfg.base_url || "";
       $("cfg-key").value = "";
-      $("cfg-key").placeholder = cfg.has_key ? "ключ сохранён — введите новый, чтобы заменить" : "sk-…";
+      $("cfg-key").placeholder = cfg.has_key
+        ? "••••••••  ✓ ключ сохранён и скрыт — оставьте поле пустым"
+        : "ключ ещё не введён";
+      $("cfg-key-state").textContent = cfg.has_key ? "✓ сохранён" : "не задан";
+      $("cfg-key-state").className = "key-state " + (cfg.has_key ? "ok" : "missing");
       $("cfg-model").value = cfg.model || "";
       $("cfg-out").value = cfg.output_dir || "";
       $("cfg-ssl").checked = !!cfg.verify_ssl;

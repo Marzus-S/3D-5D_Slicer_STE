@@ -105,8 +105,9 @@
       <label>URL API (OpenAI-совместимый)
         <input id="cfg-url" placeholder="https://…/v1">
       </label>
-      <label>Ключ API
+      <label>Ключ API <span class="key-state" id="cfg-key-state"></span>
         <input id="cfg-key" type="password" autocomplete="off" placeholder="sk-…">
+        <span class="key-note">Сохранённый ключ не показывается из соображений безопасности. Вводить заново нужно, только чтобы заменить его.</span>
       </label>
       <label>Модель
         <input id="cfg-model" placeholder="оставьте пустым — возьмём первую из /models" list="model-list">
