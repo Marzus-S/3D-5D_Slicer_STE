@@ -901,9 +901,13 @@ class SlicerTools:
 
     # ------------------------------------------------------------------ слайсинг
 
-    def slice(self, wait=True, timeout=600):
+    def slice(self, wait=True, timeout=None):
         if not run_on_main(_scene_nodes):
             raise ToolError("Сцена пуста — нечего нарезать")
+        if timeout is None:
+            # 5D-движок (Glicer) строит цилиндрические слои в разы дольше обычной нарезки.
+            mode = run_on_main(lambda: _global_stack().getProperty("printing_mode", "value"))
+            timeout = 600 if mode == "classic" else 2400
         if self.watcher.ensure_connected():
             time.sleep(3.0)  # слежение только началось — недавних изменений мы не видели
         # Запускаем нарезку только когда настройки «осели» — иначе слайсер отменит её или упадёт.
