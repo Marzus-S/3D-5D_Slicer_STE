@@ -373,14 +373,13 @@ class RangeStack:
 
 
 hard = RangeStack(minimum_value=0, maximum_value=100, minimum_value_warning=5, maximum_value_warning=90)
-check("range: value inside", T._range_problem(hard, "infill_sparse_density", 40) == (None, None))
-check("range: above max rejected", T._range_problem(hard, "infill_sparse_density", 150)[0] is not None)
-check("range: warning only", T._range_problem(hard, "infill_sparse_density", 95)[0] is None
-      and T._range_problem(hard, "infill_sparse_density", 95)[1] is not None)
+check("range: value inside", T._range_problem(hard, "infill_sparse_density", 40) is None)
+check("range: above max rejected", T._range_problem(hard, "infill_sparse_density", 150) is not None)
+check("range: recommended range enforced", T._range_problem(hard, "infill_sparse_density", 95) is not None)
 K.MATERIAL_LIMITS["test_pa"] = {"material_print_temperature": (250, 280)}
 temp = RangeStack(minimum_value=0, maximum_value=365)
-check("range: material passport", T._range_problem(temp, "material_print_temperature", 300, "test_pa_x")[0] is not None
-      and T._range_problem(temp, "material_print_temperature", 260, "test_pa_x")[0] is None)
+check("range: material passport", T._range_problem(temp, "material_print_temperature", 300, "test_pa_x") is not None
+      and T._range_problem(temp, "material_print_temperature", 260, "test_pa_x") is None)
 del K.MATERIAL_LIMITS["test_pa"]
 check("flow limits by material", K.max_volumetric_flow("enduse_tpu_d70") < K.max_volumetric_flow("fiberpart_pc_g20")
       <= K.max_volumetric_flow("enduse_petg"))
