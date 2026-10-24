@@ -148,7 +148,10 @@ def _make_handler(server):
             try:
                 if path == "/api/events":
                     after = int((query.get("after") or ["0"])[0])
-                    return self._send(200, server._api.api_events(after))
+                    session = (query.get("session") or [""])[0]
+                    return self._send(200, server._api.api_events(after, session))
+                if path == "/api/sessions":
+                    return self._send(200, server._api.api_sessions())
                 if path == "/api/config":
                     return self._send(200, server._api.api_get_config())
                 if path == "/api/state":
@@ -176,7 +179,14 @@ def _make_handler(server):
                     return self._send(200, response)
                 body = json.loads(raw) if raw else {}
                 if path == "/api/message":
-                    return self._send(200, server._api.api_message(body.get("text", ""), body.get("attachments") or []))
+                    return self._send(200, server._api.api_message(
+                        body.get("text", ""), body.get("attachments") or [], body.get("session"), body.get("mode")))
+                if path == "/api/sessions/new":
+                    return self._send(200, server._api.api_session_new())
+                if path == "/api/sessions/select":
+                    return self._send(200, server._api.api_session_select(str(body.get("id", ""))))
+                if path == "/api/sessions/delete":
+                    return self._send(200, server._api.api_session_delete(str(body.get("id", ""))))
                 if path == "/api/config":
                     return self._send(200, server._api.api_set_config(body))
                 if path == "/api/test":

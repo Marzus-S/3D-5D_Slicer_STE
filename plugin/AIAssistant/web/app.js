@@ -1,4 +1,4 @@
-// SPA чата: история диалога, вложения, вызовы инструментов, прогресс слайсинга, настройки LLM.
+// SPA чата: история чатов, режимы «новичок / инженер», вложения, шаги агента, прогресс слайсинга, темы.
 (function () {
   "use strict";
 
@@ -12,19 +12,58 @@
     try { return sessionStorage.getItem("ste-ai-token") || ""; } catch (e) { return ""; }
   })();
 
+  // ---------- личные настройки вида (только в этом браузере) ----------
+  function stored(key, fallback) {
+    try { return localStorage.getItem(key) || fallback; } catch (e) { return fallback; }
+  }
+  function store(key, value) {
+    try { localStorage.setItem(key, value); } catch (e) {}
+  }
+
   var $ = function (id) { return document.getElementById(id); };
   var messagesEl = $("messages");
   var chatEl = $("chat");
   var inputEl = $("input");
   var attachmentsEl = $("attachments");
   var pending = [];        // вложения, ещё не отправленные
+  var sessionId = "";      // открытый чат
   var lastEventId = 0;
-  var busy = false;
+  var busyHere = false;
   var toolCards = {};      // call_id → элемент карточки
   var progressEl = null;
+  var mode = stored("ste-ai-mode", "engineer");
+  var theme = stored("ste-ai-theme", "studio");
 
   var MODE_LABELS = { classic: "3D", cylindrical: "5D Spiral", cylindrical_full: "5D" };
 
+  var WELCOME = {
+    novice: {
+      badge: "Режим: новичок",
+      title: "Расскажите, что хотите напечатать",
+      text: "Пишите своими словами — ассистент задаст пару вопросов, сам подберёт материал и настройки " +
+        "и объяснит всё простым языком. Можно просто спросить, как устроена печать.",
+      examples: [
+        ["Хочу напечатать крепкий держатель", "Расскажу, где он будет висеть, — остальное на вас"],
+        ["Что такое заполнение и сколько ставить?", "Объясните простыми словами"],
+        ["Почему у детали отслаиваются углы?", "И как это исправить в настройках"],
+        ["Я новичок, помогите подготовить модель", "Прикреплю STL — подскажите по шагам"]
+      ]
+    },
+    engineer: {
+      badge: "Режим: инженер",
+      title: "Опишите задачу печати",
+      text: "Приложите STL/OBJ/3MF или ТЗ. Ассистент выберет режим 3D/5D, материал, профиль и ключевые " +
+        "настройки, сориентирует модель, нарежет её, сохранит G-code и 3MF и обоснует решения.",
+      examples: [
+        ["Кронштейн под нагрузку, PETG, без поддержек", "Типовая задача из кейса"],
+        ["Деталь по ТЗ: подбери режим, материал и настройки", "Нарежь и сохрани проект"],
+        ["Сравни профили Fine и Normal", "По времени печати и расходу материала"],
+        ["Проанализируй геометрию модели", "И предложи ориентацию для 3D или 5D"]
+      ]
+    }
+  };
+
+  // ---------- запросы к плагину ----------
   function api(path, options) {
     options = options || {};
     var headers = { "X-Auth-Token": token };
@@ -33,9 +72,12 @@
       method: options.method || (options.body !== undefined ? "POST" : "GET"),
       headers: headers,
       body: options.body !== undefined ? JSON.stringify(options.body) : undefined
+    }).catch(function () {
+      throw new Error("Нет связи с плагином: слайсер закрыт или страница открыта не из меню. " +
+        "Запустите STE Slicer и откройте чат через Extensions → AI Assistant → Открыть чат.");
     }).then(function (response) {
       return response.json().catch(function () { return {}; }).then(function (data) {
-        if (response.status === 401) throw new Error("Нет доступа: откройте чат из меню слайсера «AI Assistant → Открыть чат».");
+        if (response.status === 401) throw new Error("Нет доступа: откройте чат из меню слайсера «Extensions → AI Assistant → Открыть чат».");
         if (!response.ok) throw new Error(data.error || ("HTTP " + response.status));
         return data;
       });
@@ -101,7 +143,20 @@
     return html.join("");
   }
 
-  // ---------- отрисовка событий ----------
+  // Строки «Варианты: a | b | c» превращаем в кнопки быстрых ответов.
+  function splitOptions(text) {
+    var groups = [];
+    var body = String(text || "").split(/\r?\n/).filter(function (line) {
+      var match = line.match(/^\s*[*_`]*\s*Варианты\s*[*_`]*\s*:\s*(.+)$/i);
+      if (!match) return true;
+      var options = match[1].split("|").map(function (o) { return o.replace(/[`*]/g, "").trim(); }).filter(Boolean);
+      if (options.length) groups.push(options);
+      return false;
+    }).join("\n");
+    return { body: body, groups: groups };
+  }
+
+  // ---------- отрисовка ----------
   function scrollDown() { chatEl.scrollTop = chatEl.scrollHeight; }
 
   function add(el) {
@@ -118,6 +173,14 @@
     return el;
   }
 
+  function avatar() {
+    var img = document.createElement("img");
+    img.src = "favicon.svg";
+    img.alt = "";
+    img.className = "avatar";
+    return img;
+  }
+
   function briefArgs(args) {
     if (!args) return "";
     var parts = [];
@@ -131,14 +194,36 @@
     return text.length > 110 ? text.slice(0, 110) + "…" : text;
   }
 
-  function renderEvent(event) {
+  function renderOptions(container, groups, live) {
+    groups.forEach(function (options) {
+      var row = div("options");
+      options.forEach(function (option) {
+        var button = document.createElement("button");
+        button.textContent = option;
+        button.disabled = !live;
+        button.onclick = function () {
+          if (busyHere) return;
+          if (groups.length === 1 || /реши сам/i.test(option)) {
+            inputEl.value = option;
+            send();
+            return;
+          }
+          Array.prototype.forEach.call(row.children, function (b) { b.classList.remove("picked"); });
+          button.classList.add("picked");
+          var picked = Array.prototype.map.call(container.querySelectorAll(".options button.picked"), function (b) { return b.textContent; });
+          inputEl.value = picked.join("; ");
+          autosize();
+          inputEl.focus();
+        };
+        row.appendChild(button);
+      });
+      container.appendChild(row);
+    });
+    if (live && groups.length > 1) container.appendChild(div("options-hint", "Выберите варианты и нажмите «Отправить»"));
+  }
+
+  function renderEvent(event, live) {
     switch (event.type) {
-      case "reset":
-        messagesEl.innerHTML = "";
-        toolCards = {};
-        progressEl = null;
-        $("welcome").classList.remove("hidden");
-        break;
       case "user": {
         var el = div("msg user");
         el.textContent = event.text || "";
@@ -151,13 +236,23 @@
           });
           el.appendChild(files);
         }
-        add(el);
+        var row = div("row user");
+        row.appendChild(el);
+        add(row);
         progressEl = null;
+        Array.prototype.forEach.call(messagesEl.querySelectorAll(".options button"), function (b) { b.disabled = true; });
         break;
       }
-      case "assistant":
-        add(div("msg assistant", markdown(event.text)));
+      case "assistant": {
+        var parsed = splitOptions(event.text);
+        var bubble = div("msg assistant", markdown(parsed.body));
+        if (parsed.groups.length) renderOptions(bubble, parsed.groups, live);
+        var line = div("row");
+        line.appendChild(avatar());
+        line.appendChild(bubble);
+        add(line);
         break;
+      }
       case "assistant_note":
         add(div("msg note", escapeHtml(event.text)));
         break;
@@ -182,8 +277,9 @@
       case "tool_result": {
         var target = toolCards[event.call_id];
         if (!target) break;
-        target.querySelector(".status").textContent = event.ok ? "✓" : "✗";
-        target.querySelector(".status").style.color = event.ok ? "var(--ok)" : "var(--err)";
+        var status = target.querySelector(".status");
+        status.textContent = event.ok ? "✓" : "✗";
+        status.style.color = event.ok ? "var(--ok)" : "var(--err)";
         target.querySelector(".time").textContent = event.seconds ? event.seconds + " с" : "";
         target.querySelector(".result").textContent = event.result || "";
         if (!event.ok) target.classList.add("failed");
@@ -201,9 +297,9 @@
       }
       case "slice_result":
         add(div("result-card",
-          "<span>⏱ <b>" + escapeHtml(event.print_time || "—") + "</b></span>" +
-          "<span>⚖ <b>" + escapeHtml(event.weight != null ? event.weight + " г" : "—") + "</b></span>" +
-          "<span>Режим: <b>" + escapeHtml(MODE_LABELS[event.mode] || event.mode || "—") + "</b></span>"));
+          '<div><div class="k">Время печати</div><div class="v">' + escapeHtml(event.print_time || "—") + "</div></div>" +
+          '<div><div class="k">Материал</div><div class="v">' + escapeHtml(event.weight != null ? event.weight + " г" : "—") + "</div></div>" +
+          '<div><div class="k">Режим</div><div class="v">' + escapeHtml(MODE_LABELS[event.mode] || event.mode || "—") + "</div></div>"));
         break;
       case "file_saved":
         add(div("saved", (event.kind === "export_gcode" ? "💾 G-code: " : "💾 Проект 3MF: ") +
@@ -218,26 +314,154 @@
     }
   }
 
-  function setBusy(value) {
-    busy = value;
-    $("thinking").classList.toggle("hidden", !value);
-    $("btn-stop").classList.toggle("hidden", !value);
-    $("btn-send").disabled = value;
-    if (value) scrollDown();
+  function clearChat() {
+    messagesEl.innerHTML = "";
+    toolCards = {};
+    progressEl = null;
+    lastEventId = 0;
+    $("welcome").classList.remove("hidden");
+  }
+
+  // ---------- режим и тема ----------
+  function applyMode(value) {
+    mode = value === "novice" ? "novice" : "engineer";
+    store("ste-ai-mode", mode);
+    Array.prototype.forEach.call(document.querySelectorAll("#mode-switch button"), function (b) {
+      b.classList.toggle("active", b.getAttribute("data-mode") === mode);
+    });
+    var w = WELCOME[mode];
+    $("welcome-badge").textContent = w.badge;
+    $("welcome-title").textContent = w.title;
+    $("welcome-text").textContent = w.text;
+    var box = $("examples");
+    box.innerHTML = "";
+    w.examples.forEach(function (example) {
+      var button = document.createElement("button");
+      button.className = "example";
+      button.innerHTML = "<b>" + escapeHtml(example[0]) + "</b><span>" + escapeHtml(example[1]) + "</span>";
+      button.onclick = function () { inputEl.value = example[0]; autosize(); inputEl.focus(); };
+      box.appendChild(button);
+    });
+    inputEl.placeholder = mode === "novice"
+      ? "Опишите деталь своими словами или спросите что угодно о печати…"
+      : "Задача, ТЗ или вопрос. Приложите модель — Enter для отправки";
+  }
+
+  function applyTheme(value) {
+    theme = ["studio", "graphite", "blueprint"].indexOf(value) >= 0 ? value : "studio";
+    store("ste-ai-theme", theme);
+    document.documentElement.setAttribute("data-theme", theme);
+    Array.prototype.forEach.call(document.querySelectorAll(".theme-card"), function (card) {
+      card.classList.toggle("active", card.getAttribute("data-theme-pick") === theme);
+    });
+  }
+
+  // ---------- история чатов ----------
+  function timeLabel(seconds) {
+    var date = new Date(seconds * 1000);
+    var now = new Date();
+    var pad = function (n) { return (n < 10 ? "0" : "") + n; };
+    if (date.toDateString() === now.toDateString()) return "сегодня, " + pad(date.getHours()) + ":" + pad(date.getMinutes());
+    return pad(date.getDate()) + "." + pad(date.getMonth() + 1) + ", " + pad(date.getHours()) + ":" + pad(date.getMinutes());
+  }
+
+  function renderSessions(data) {
+    var list = $("chat-list");
+    list.innerHTML = "";
+    var items = data.sessions || [];
+    var current = items.filter(function (s) { return s.id === sessionId; })[0];
+    $("chat-title").textContent = current ? current.title : "Новый чат";
+    if (!items.length) { list.appendChild(div("chat-empty", "Пока нет чатов")); return; }
+    items.forEach(function (s) {
+      var item = div("chat-item" + (s.id === sessionId ? " active" : ""));
+      var meta = div("meta");
+      var title = div("title");
+      title.textContent = s.title;
+      var when = div("time");
+      when.textContent = s.messages ? timeLabel(s.updated) : "пустой";
+      meta.appendChild(title);
+      meta.appendChild(when);
+      item.appendChild(meta);
+      if (data.busy && data.running === s.id) item.appendChild(div("running"));
+      var del = document.createElement("button");
+      del.className = "del";
+      del.title = "Удалить чат";
+      del.textContent = "×";
+      del.onclick = function (event) {
+        event.stopPropagation();
+        if (!confirm("Удалить чат «" + s.title + "»?")) return;
+        api("/api/sessions/delete", { body: { id: s.id } }).then(function (result) {
+          if (!result.ok) throw new Error(result.error);
+          openSession(result.session);
+        }).catch(function (error) { add(div("msg error", "⚠ " + escapeHtml(error.message))); });
+      };
+      item.appendChild(del);
+      item.onclick = function () {
+        document.body.classList.remove("side-open");
+        if (s.id !== sessionId) api("/api/sessions/select", { body: { id: s.id } }).then(function () { openSession(s.id); });
+      };
+      list.appendChild(item);
+    });
+  }
+
+  function refreshSessions() {
+    return api("/api/sessions").then(function (data) {
+      if (!sessionId) sessionId = data.current;
+      renderSessions(data);
+      return data;
+    }).catch(function () {});
+  }
+
+  function openSession(id) {
+    sessionId = id;
+    clearChat();
+    refreshSessions();
+    pollNow();
+  }
+
+  // ---------- опрос событий ----------
+  var pollTimer = null;
+  function pollNow() {
+    if (pollTimer) clearTimeout(pollTimer);
+    poll();
   }
 
   function poll() {
-    api("/api/events?after=" + lastEventId).then(function (data) {
-      (data.events || []).forEach(function (event) {
+    if (!sessionId) { pollTimer = setTimeout(poll, 500); return; }
+    var asked = sessionId;
+    api("/api/events?after=" + lastEventId + "&session=" + encodeURIComponent(asked)).then(function (data) {
+      if (asked !== sessionId) return;
+      var events = data.events || [];
+      var wasBusy = busyHere;
+      events.forEach(function (event) {
         lastEventId = Math.max(lastEventId, event.id);
-        renderEvent(event);
+        renderEvent(event, isLastAssistant(events, event));
       });
-      setBusy(!!data.busy);
+      setBusy(!!data.busy && data.running === asked, !!data.busy && data.running !== asked);
+      if (events.length && (wasBusy !== busyHere || events.some(function (e) { return e.type === "user" || e.type === "run_end"; }))) refreshSessions();
     }).catch(function (error) {
       showBanner(error.message);
     }).then(function () {
-      setTimeout(poll, busy ? 400 : 1000);
+      pollTimer = setTimeout(poll, busyHere ? 400 : 1000);
     });
+  }
+
+  // Кнопки ответов активны только у последнего ответа ассистента в чате.
+  function isLastAssistant(events, event) {
+    for (var i = events.length - 1; i >= 0; i--) {
+      if (events[i].type === "user") return false;
+      if (events[i].type === "assistant") return events[i] === event;
+    }
+    return false;
+  }
+
+  function setBusy(here, elsewhere) {
+    busyHere = here;
+    $("thinking").classList.toggle("hidden", !here);
+    $("btn-stop").classList.toggle("hidden", !here);
+    $("busy-other").classList.toggle("hidden", !elsewhere);
+    $("btn-send").disabled = here || elsewhere;
+    if (here) scrollDown();
   }
 
   var bannerShown = false;
@@ -249,7 +473,6 @@
 
   // ---------- состояние слайсера ----------
   function refreshState() {
-    if (busy && document.hidden) return;
     api("/api/state").then(function (state) {
       if (state.error) return;
       $("chip-printer").textContent = state.printer || "—";
@@ -263,8 +486,13 @@
   // ---------- отправка ----------
   function send() {
     var text = inputEl.value.trim();
-    if (busy || (!text && !pending.length)) return;
-    var payload = { text: text, attachments: pending.map(function (f) { return { name: f.name, data: f.data }; }) };
+    if (busyHere || (!text && !pending.length)) return;
+    var payload = {
+      text: text,
+      session: sessionId,
+      mode: mode,
+      attachments: pending.map(function (f) { return { name: f.name, data: f.data }; })
+    };
     $("btn-send").disabled = true;
     api("/api/message", { body: payload }).then(function (data) {
       if (!data.ok) throw new Error(data.error || "Не удалось отправить");
@@ -272,7 +500,8 @@
       autosize();
       pending = [];
       renderAttachments();
-      setBusy(true);
+      setBusy(true, false);
+      pollNow();
     }).catch(function (error) {
       add(div("msg error", "⚠ " + escapeHtml(error.message)));
       $("btn-send").disabled = false;
@@ -365,11 +594,13 @@
   $("btn-send").onclick = send;
   $("btn-stop").onclick = function () { api("/api/stop", { body: {} }).catch(function () {}); };
   $("btn-new").onclick = function () {
-    api("/api/reset", { body: {} }).then(function (result) {
-      if (!result.ok) add(div("msg error", "⚠ " + escapeHtml(result.error)));
-    });
+    document.body.classList.remove("side-open");
+    api("/api/sessions/new", { body: {} }).then(function (result) { openSession(result.session); })
+      .catch(function (error) { add(div("msg error", "⚠ " + escapeHtml(error.message))); });
   };
-  $("btn-settings").onclick = openSettings;
+  $("btn-menu").onclick = function () { document.body.classList.toggle("side-open"); };
+  $("scrim").onclick = function () { document.body.classList.remove("side-open"); };
+  $("btn-settings").onclick = function () { document.body.classList.remove("side-open"); openSettings(); };
   $("cfg-cancel").onclick = function () { $("settings").classList.add("hidden"); };
   $("cfg-test").onclick = testSettings;
   $("cfg-save").onclick = function () {
@@ -379,14 +610,16 @@
     });
   };
   $("file-input").onchange = function (event) { addFiles(event.target.files); event.target.value = ""; };
+  Array.prototype.forEach.call(document.querySelectorAll("#mode-switch button"), function (button) {
+    button.onclick = function () { applyMode(button.getAttribute("data-mode")); };
+  });
+  Array.prototype.forEach.call(document.querySelectorAll(".theme-card"), function (card) {
+    card.onclick = function () { applyTheme(card.getAttribute("data-theme-pick")); };
+  });
 
   inputEl.addEventListener("input", autosize);
   inputEl.addEventListener("keydown", function (event) {
     if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); send(); }
-  });
-
-  Array.prototype.forEach.call(document.querySelectorAll(".example"), function (button) {
-    button.onclick = function () { inputEl.value = button.textContent; autosize(); inputEl.focus(); };
   });
 
   var dragDepth = 0;
@@ -400,8 +633,15 @@
     if (event.dataTransfer && event.dataTransfer.files) addFiles(event.dataTransfer.files);
   });
 
-  if (!token) showBanner("Нет токена сессии: откройте чат из меню слайсера «AI Assistant → Открыть чат».");
-  poll();
+  applyTheme(theme);
+  applyMode(mode);
+  if (location.protocol === "file:") {
+    showBanner("Страница открыта как файл, а не через плагин. Откройте чат из меню слайсера: Extensions → AI Assistant → Открыть чат.");
+  } else if (!token) {
+    showBanner("Нет токена сессии: откройте чат из меню слайсера «Extensions → AI Assistant → Открыть чат».");
+  }
+  refreshSessions().then(function () { poll(); });
   refreshState();
   setInterval(refreshState, 4000);
+  setInterval(refreshSessions, 5000);
 })();
