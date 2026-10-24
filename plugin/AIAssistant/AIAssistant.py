@@ -1,6 +1,7 @@
 # Точка входа плагина: пункт меню «AI Assistant», запуск локального сервера чата и MCP.
 
 import binascii
+import json
 import os
 import tempfile
 
@@ -12,9 +13,10 @@ from UM.Extension import Extension
 from UM.Logger import Logger
 from UM.Message import Message
 
-from .agent import llm
+from .agent import llm, report
 from .agent import commands
 from .agent.agent import Agent, AgentBusy
+from .agent.journal import Journal, is_error_code
 from .agent.learning import LearningTools
 from .agent.mainthread import run_on_main
 from .agent.mcp import McpHandler
@@ -39,6 +41,7 @@ DEFAULTS = [
     ("output_dir", ""),
     ("verify_ssl", True),
     ("temperature", 0.2),
+    ("log_user_name", True),
 ]
 
 
@@ -49,6 +52,14 @@ def _data_dir():
         return Resources.getDataStoragePath()
     except Exception:
         return tempfile.gettempdir()
+
+
+def _plugin_version():
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugin.json"), encoding="utf-8") as stream:
+            return json.load(stream).get("version", "")
+    except (OSError, ValueError):
+        return ""
 
 
 def _as_bool(value):
@@ -69,6 +80,10 @@ class AIAssistant(QObject, Extension):
             preferences.addPreference(PREFIX + key, default)
 
         self._token = binascii.hexlify(os.urandom(16)).decode("ascii")
+        # Журнал для поддержки: user/, model/, errors/ в папке данных слайсера. Секреты вычищаются.
+        self.journal = Journal(os.path.join(_data_dir(), "aiassistant_logs"), _plugin_version(),
+                               secrets=lambda: [self._pref("api_key") or "", self._token],
+                               log_user=lambda: _as_bool(self._pref("log_user_name")))
         self._registry = ToolRegistry()
         self._tools = SlicerTools(self._output_dir)
         self._tools.recipes = RecipeStore(os.path.join(_data_dir(), "aiassistant_recipes.json"))
@@ -77,7 +92,7 @@ class AIAssistant(QObject, Extension):
         self._mcp = McpHandler(self._registry)
         self._agent = Agent(self._registry, self._mcp, self._tools, self._llm_settings,
                             os.path.join(tempfile.gettempdir(), "ste_ai_uploads"),
-                            SessionStore(os.path.join(_data_dir(), "aiassistant_chats")), self._learning)
+                            SessionStore(os.path.join(_data_dir(), "aiassistant_chats")), self.journal, self._learning)
         self._server = ChatServer(self._web_dir, self, self._token)
 
         self.setMenuName("AI Assistant")
@@ -171,6 +186,10 @@ class AIAssistant(QObject, Extension):
             self._application.savePreferences()
 
         run_on_main(apply)
+        changed = dict((k, v) for k, v in updates.items() if k != "api_key")
+        if "api_key" in updates:
+            changed["api_key"] = "(заменён)"
+        self.journal.record("user", "config_change", changed, session=self._agent.current_id)
         return self.api_get_config()
 
     def api_test(self):
@@ -178,6 +197,8 @@ class AIAssistant(QObject, Extension):
         try:
             models = llm.list_models(settings["base_url"], settings["api_key"], settings["verify_ssl"])
         except llm.LLMError as e:
+            self.journal.warning("connection_test_failed", {"message": str(e), "status": getattr(e, "status", None),
+                                                            "base_url": settings["base_url"]})
             return {"ok": False, "error": str(e)}
         return {"ok": True, "models": models[:30],
                 "model_found": (not settings["model"]) or settings["model"] in models}
@@ -186,6 +207,9 @@ class AIAssistant(QObject, Extension):
         try:
             self._agent.submit(text, attachments, session or None, mode or "engineer")
         except (AgentBusy, ValueError) as e:
+            self.journal.record("user", "message_rejected", {
+                "reason": str(e), "text": text, "attachments": [str(a.get("name")) for a in attachments or []],
+            }, session=session or self._agent.current_id, level="warning")
             return {"ok": False, "error": str(e)}
         return {"ok": True, "session": self._agent.current_id}
 
@@ -212,17 +236,23 @@ class AIAssistant(QObject, Extension):
         return self._agent.sessions()
 
     def api_session_new(self):
-        return {"ok": True, "session": self._agent.new_session()}
+        session = self._agent.new_session()
+        self.journal.record("user", "session_new", session=session)
+        return {"ok": True, "session": session}
 
     def api_session_select(self, session_id):
         try:
-            return {"ok": True, "session": self._agent.select(session_id)}
+            session = self._agent.select(session_id)
+            self.journal.record("user", "session_select", session=session)
+            return {"ok": True, "session": session}
         except ValueError as e:
             return {"ok": False, "error": str(e)}
 
     def api_session_delete(self, session_id):
         try:
-            return {"ok": True, "session": self._agent.delete(session_id)}
+            current = self._agent.delete(session_id)
+            self.journal.record("user", "session_delete", {"deleted": session_id}, session=current)
+            return {"ok": True, "session": current}
         except AgentBusy as e:
             return {"ok": False, "error": str(e)}
 
@@ -230,8 +260,39 @@ class AIAssistant(QObject, Extension):
         return {"ok": True, "session": self._agent.reset()}
 
     def api_stop(self):
+        self.journal.record("user", "stop", {"busy": self._agent.busy}, session=self._agent.running_id)
         self._agent.stop()
         return {"ok": True}
+
+    def api_error_report(self, code):
+        """HTML-отчёт об ошибке для поддержки; копия сохраняется в errors/reports/."""
+        if not is_error_code(code):
+            return None
+        record = self.journal.find_error(code)
+        if record is None:
+            return None
+        context = {"llm_model": (record.get("data") or {}).get("model") or self._pref("model") or ""}
+        try:
+            state = self._tools.get_printer_state()
+            context.update({"printer": state.get("printer"), "printing_mode": state.get("printing_mode_label")})
+        except Exception:
+            pass
+        page = report.render(record, self.journal.session_events(record.get("session"), record.get("time")), context)
+        path = self.journal.report_path(code)
+        try:
+            if not os.path.isdir(os.path.dirname(path)):
+                os.makedirs(os.path.dirname(path))
+            with open(path, "w", encoding="utf-8") as stream:
+                stream.write(page)
+        except OSError as e:
+            Logger.log("w", "[AIAssistant] Cannot save error report: %s", e)
+        return page
+
+    def log_server_error(self, method, path, error, traceback_text):
+        """Сбой обработчика HTTP-запроса → errors/; код возвращается клиенту вместе с текстом ошибки."""
+        return self.journal.error(error, error_type=type(error).__name__, kind="internal", stage="http",
+                                  traceback_text=traceback_text, session=self._agent.current_id,
+                                  data={"method": method, "path": path})
 
     def api_state(self):
         try:

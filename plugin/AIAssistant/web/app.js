@@ -29,6 +29,7 @@
   var pending = [];        // вложения, ещё не отправленные
   var sessionId = "";      // открытый чат
   var lastEventId = 0;
+  var lastUserText = "";  // для кнопки «Повторить» на карточке ошибки
   var busyHere = false;
   var toolCards = {};      // call_id → элемент карточки
   var quizCards = {};      // id события квиза → карточка
@@ -260,6 +261,7 @@
   function renderEvent(event, live) {
     switch (event.type) {
       case "user": {
+        lastUserText = event.text || "";
         var el = div("msg user");
         el.textContent = event.text || "";
         if (event.attachments && event.attachments.length) {
@@ -371,7 +373,7 @@
         add(div("msg note", escapeHtml(event.text)));
         break;
       case "error":
-        add(div("msg error", "⚠ " + escapeHtml(event.text)));
+        add(event.title ? errorCard(event) : div("msg error", "⚠ " + escapeHtml(event.text)));
         break;
     }
   }
@@ -482,6 +484,58 @@
     autosize();
     inputEl.focus();
     if (!takesArgs) send();
+  }
+
+  // ---------- ошибки: понятная карточка и отчёт для поддержки ----------
+  var ERROR_ACTIONS = {
+    settings: ["Открыть настройки", function () { openSettings(); }],
+    retry: ["Повторить", function () { if (lastUserText) { inputEl.value = lastUserText; send(); } }],
+    new_chat: ["Новый чат", function () { $("btn-new").click(); }],
+    "continue": ["Продолжить", function () { inputEl.value = "продолжай"; send(); }]
+  };
+
+  function errorCard(event) {
+    var card = div("msg error err-card",
+      '<div class="err-title">⚠ ' + escapeHtml(event.title) + "</div>" +
+      '<div class="err-hint">' + escapeHtml(event.hint || "") + "</div>" +
+      '<div class="err-actions"></div>' +
+      (mode === "engineer" && event.text
+        ? '<details class="err-raw"><summary>Подробнее</summary><code>' + escapeHtml(event.text) + "</code></details>"
+        : "") +
+      (event.code ? '<div class="err-code">Код ошибки: ' + escapeHtml(event.code) + "</div>" : ""));
+    var actions = card.querySelector(".err-actions");
+    var action = ERROR_ACTIONS[event.action];
+    if (action) actions.appendChild(errorButton(action[0], action[1], true));
+    if (event.code) actions.appendChild(errorButton("Отчёт для поддержки", function () { openReport(event.code); }, !action));
+    return card;
+  }
+
+  function errorButton(label, handler, primary) {
+    var button = document.createElement("button");
+    button.type = "button";
+    button.className = primary ? "primary" : "";
+    button.textContent = label;
+    button.onclick = handler;
+    return button;
+  }
+
+  function openReport(code) {
+    // Окно открываем сразу по клику, иначе браузер заблокирует его как всплывающее.
+    var win = window.open("", "_blank");
+    fetch("/api/error-report?code=" + encodeURIComponent(code), { headers: { "X-Auth-Token": token } })
+      .then(function (response) {
+        if (!response.ok) throw new Error("Отчёт не найден (HTTP " + response.status + ")");
+        return response.text();
+      })
+      .then(function (page) {
+        var url = URL.createObjectURL(new Blob([page], { type: "text/html;charset=utf-8" }));
+        if (win) { win.opener = null; win.location = url; }
+        else add(div("msg note", 'Браузер заблокировал окно. <a href="' + url + '" target="_blank" rel="noopener">Открыть отчёт</a>'));
+      })
+      .catch(function (error) {
+        if (win) win.close();
+        add(div("msg error", "⚠ " + escapeHtml(error.message)));
+      });
   }
 
   function clearChat() {

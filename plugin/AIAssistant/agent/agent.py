@@ -12,7 +12,7 @@ import traceback
 
 from UM.Logger import Logger
 
-from . import commands, knowledge, llm
+from . import commands, errors, knowledge, llm
 from .knowledge import MODE_PROMPTS
 from .sessions import DEFAULT_TITLE, Session
 
@@ -40,7 +40,7 @@ class AgentBusy(Exception):
 
 
 class Agent:
-    def __init__(self, registry, mcp_handler, tools, settings_provider, upload_dir, store, learning=None):
+    def __init__(self, registry, mcp_handler, tools, settings_provider, upload_dir, store, journal, learning=None):
         self._registry = registry
         self._learning = learning  # LearningTools: проверка ответов квиза и прогресс ученика
         self._mcp = mcp_handler
@@ -48,6 +48,7 @@ class Agent:
         self._settings_provider = settings_provider
         self._upload_dir = upload_dir
         self._store = store
+        self._journal = journal
         self._sessions = {s.id: s for s in store.load_all()}
         recent = sorted(self._sessions.values(), key=lambda s: s.updated, reverse=True)
         self._current_id = recent[0].id if recent else None
@@ -59,6 +60,8 @@ class Agent:
         self._request_id = 0
         self._last_progress = (0.0, 0.0)
         self._digests = {}  # tool_call_id → выжимка результата для сжатой истории
+        self._context = (None, None)  # (чат, номер запроса) для журнала
+        self._model = ""
 
     @property
     def busy(self):
@@ -243,6 +246,9 @@ class Agent:
             Logger.log("w", "[AIAssistant] Cannot reload knowledge.py: %s", e)
         messages = session.messages
         self._events = session.events
+        run = "r%d" % (sum(1 for m in messages if m.get("role") == "user") + 1)
+        self._context = (session.id, run)
+        session.events.listener = lambda event: self._journal.chat_event(session.id, run, event)
         finished_cleanly = False
         try:
             if session.title == DEFAULT_TITLE:
@@ -254,6 +260,7 @@ class Agent:
             messages.append(self._user_message(text, files))
             settings = self._settings_provider()
             model = settings.get("model") or self._auto_model(settings)
+            self._model = model
             self._tools.run_context = {"llm_model": model, "mode": mode, "task": _first_user_text(messages)}
             tools_schema = self._registry.llm_tools(mode)
             self._tools.watcher.progress_callback = self._on_progress
@@ -281,8 +288,8 @@ class Agent:
                     self._events.add("status", text="Агент долго собирал данные — прошу принять решение по уже собранному")
                     continue
                 if guard.tripped:
-                    self._events.add("error", text="Агент начал повторять одни и те же действия и остановлен. "
-                                                   "Проверьте, что модель прикреплена, или уточните задачу.")
+                    self._report_error("Агент начал повторять одни и те же действия и остановлен. "
+                                       "Проверьте, что модель прикреплена, или уточните задачу.", "loop_guard", kind="loop")
                     messages.append({"role": "assistant", "content": "(остановлено: повтор одних и тех же действий)"})
                     finished_cleanly = True
                     break
@@ -343,15 +350,16 @@ class Agent:
                             result_text = result_text[:-1] + ', "hint": %s}' % json.dumps(hint, ensure_ascii=False)
                     messages.append({"role": "tool", "tool_call_id": call["id"], "content": result_text})
             else:
-                self._events.add("error", text="Достигнут лимит шагов (%d). Напишите «продолжай», чтобы агент закончил." % MAX_STEPS)
+                self._report_error("Достигнут лимит шагов (%d). Напишите «продолжай», чтобы агент закончил." % MAX_STEPS,
+                                   "agent_loop", kind="steps")
                 messages.append({"role": "assistant", "content": "(достигнут лимит шагов)"})
                 finished_cleanly = True
         except llm.LLMError as e:
             Logger.log("e", "[AIAssistant] LLM error: %s", e)
-            self._events.add("error", text=str(e))
+            self._report_error(e, "llm_chat", traceback_text=traceback.format_exc())
         except Exception as e:
             Logger.log("e", "[AIAssistant] Agent failed: %s\n%s", e, traceback.format_exc())
-            self._events.add("error", text="%s: %s" % (type(e).__name__, e))
+            self._report_error(e, "agent", traceback_text=traceback.format_exc())
         finally:
             if not finished_cleanly and messages and messages[-1].get("role") != "assistant":
                 # Роли должны чередоваться — иначе следующий запрос к модели может упасть.
@@ -367,11 +375,15 @@ class Agent:
             self._busy = False
             self._running_id = None
             self._events.add("run_end")
+            session.events.listener = None
 
     def _run_command(self, session, text, files, mode):
         """Быстрая команда: инструменты вызываются напрямую, без LLM. В историю для модели попадают команда
         и итог, чтобы следующий обычный запрос знал, что поменялось."""
         self._events = session.events
+        run = "c%d" % (sum(1 for m in session.messages if m.get("role") == "user") + 1)
+        self._context = (session.id, run)
+        session.events.listener = lambda event: self._journal.chat_event(session.id, run, event)
         started = time.time()
         try:
             if session.title == DEFAULT_TITLE:
@@ -396,7 +408,7 @@ class Agent:
             session.messages.append({"role": "assistant", "content": reply or "(показаны вопросы квиза)"})
         except Exception as e:
             Logger.log("e", "[AIAssistant] Command failed: %s\n%s", e, traceback.format_exc())
-            self._events.add("error", text="%s: %s" % (type(e).__name__, e))
+            self._report_error(e, "command", traceback_text=traceback.format_exc())
         finally:
             self._tools.watcher.progress_callback = None
             self._tools.cancel_check = None
@@ -409,6 +421,7 @@ class Agent:
             self._busy = False
             self._running_id = None
             self._events.add("run_end")
+            session.events.listener = None
 
     # ------------------------------------------------------------------ квиз
 
@@ -453,6 +466,9 @@ class Agent:
                                 settings["temperature"], settings["verify_ssl"])
             except llm.LLMError as e:
                 Logger.log("w", "[AIAssistant] LLM error (attempt %d, budget %d): %s", attempt, budget, e)
+                self._journal.warning("llm_attempt_failed", {"attempt": attempt, "budget": budget, "model": model,
+                                                             "message": str(e), "status": getattr(e, "status", None)},
+                                      *self._context)
                 text = str(e).lower()
                 too_big = any(w in text for w in ("context", "too long", "token", "length", "1024"))
                 if attempt == 3 or not (too_big or e.retryable):
@@ -503,6 +519,8 @@ class Agent:
             payload = result.get("structuredContent")
             if payload is None:
                 payload = {"text": result["content"][0]["text"]}
+        if not ok:
+            self._journal.warning("tool_error", {"name": name, "args": args, "result": payload}, *self._context)
         self._events.add("tool_result", call_id=call_id, name=name, title=title, ok=ok,
                         result=_preview(payload), seconds=round(time.time() - started, 1))
         if ok and name in ("slice", "get_slice_result") and isinstance(payload, dict) and payload.get("print_time"):
@@ -533,6 +551,19 @@ class Agent:
         if digest:
             self._digests[call_id] = digest
         return ok, payload
+
+    def _report_error(self, error, stage, kind=None, traceback_text=None):
+        """Ошибка → errors/ с внутренним логом и кодом; в чат — понятная карточка с тем же кодом."""
+        info = errors.describe(kind or errors.classify(error))
+        session, run = self._context
+        message = str(error)
+        error_type = type(error).__name__ if isinstance(error, BaseException) else "AgentStop"
+        code = self._journal.error(message, error_type=error_type, kind=info["kind"], stage=stage,
+                                   traceback_text=traceback_text, session=session, run=run,
+                                   data={"model": self._model})
+        self._events.add("error", text=message, code=code, category=info["kind"], title=info["title"],
+                         hint=info["hint"], action=info["action"])
+        return code
 
     def _on_progress(self, amount):
         now = time.time()

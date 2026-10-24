@@ -7,6 +7,7 @@ import json
 import os
 import socketserver
 import threading
+import traceback
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -115,6 +116,19 @@ def _make_handler(server):
             raw = self.rfile.read(length).decode("utf-8") if length else ""
             return raw
 
+        def _fail(self, method, path, error):
+            details = traceback.format_exc()
+            Logger.log("w", "[AIAssistant] %s %s failed: %s", method, path, error)
+            code = None
+            try:
+                code = server._api.log_server_error(method, path, error, details)
+            except Exception:
+                pass
+            text = "%s: %s" % (type(error).__name__, error)
+            if code:
+                text += " (код ошибки %s)" % code
+            return self._send(500, {"error": text, "code": code})
+
         def _guard(self):
             if not self._host_ok():
                 self._send(403, {"error": "forbidden host/origin"})
@@ -158,9 +172,13 @@ def _make_handler(server):
                     return self._send(200, server._api.api_state())
                 if path == "/api/commands":
                     return self._send(200, server._api.api_commands())
+                if path == "/api/error-report":
+                    page = server._api.api_error_report((query.get("code") or [""])[0])
+                    if page is None:
+                        return self._send(404, {"error": "отчёт не найден"})
+                    return self._send(200, page, "text/html; charset=utf-8")
             except Exception as e:
-                Logger.log("w", "[AIAssistant] GET %s failed: %s", path, e)
-                return self._send(500, {"error": str(e)})
+                return self._fail("GET", path, e)
             return self._send(404, {"error": "not found"})
 
         # ------------------------------------------------------------ POST
@@ -202,8 +220,7 @@ def _make_handler(server):
             except ValueError as e:
                 return self._send(400, {"error": str(e)})
             except Exception as e:
-                Logger.log("w", "[AIAssistant] POST %s failed: %s", path, e)
-                return self._send(500, {"error": "%s: %s" % (type(e).__name__, e)})
+                return self._fail("POST", path, e)
             return self._send(404, {"error": "not found"})
 
     return Handler

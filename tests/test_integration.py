@@ -638,6 +638,22 @@ A.Agent._execute = original_execute
 finals = [e["text"] for e in evs if e["type"] == "assistant"]
 check("after plan: auto summary instead of loop", finals and "Итог собран автоматически" in finals[-1]
       and not any(e["type"] == "error" for e in evs) and executed == ["apply_plan"], str(executed))
+
+# ---------------- журнал событий и отчёт для поддержки ----------------
+from AIAssistant.agent import journal as J
+jdir = tempfile.mkdtemp()
+jr = J.Journal(jdir, "0.2.0", secrets=lambda: ["secret-key-123456"], log_user=lambda: False)
+jr.warning("tool_error", {"note": "ключ secret-key-123456 и sk-abcdef123456", "api_key": "x"}, "s1", "r1")
+err_code = jr.error("сбой с ключом secret-key-123456", error_type="ValueError", stage="test", session="s1", run="r1")
+dump = "".join(open(f, encoding="utf-8").read() for f in glob.glob(os.path.join(jdir, "**", "*.jsonl"), recursive=True))
+check("journal: secrets scrubbed", dump and "secret-key-123456" not in dump and "sk-abcdef123456" not in dump
+      and "tool_error" in dump)
+check("journal: error code findable", J.is_error_code(err_code) and jr.find_error(err_code) is not None, err_code)
+live_code = assistant.journal.error("проверка отчёта", stage="test")
+status, page = call("/api/error-report?code=" + live_code)
+check("error report page by code", status == 200 and b"<" in page, str(status))
+status, _ = call("/api/error-report?code=E-0000-FFFF")
+check("unknown error code -> 404", status == 404)
 check("passport: mode differs from advice noted", any("5D-советника" in n for n in saved["notes"]), str(saved["notes"]))
 check("passport: markdown sections", all(s in markdown for s in ("## Решения", "## 5D-советник", "## Изменённые настройки",
                                                                  "## Заполняет технолог", "mock-gemma", "Колесо конвейера")))

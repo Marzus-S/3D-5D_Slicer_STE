@@ -22,6 +22,7 @@ class EventLog:
         self._events = list(events or [])
         self._next_id = max([e.get("id", 0) for e in self._events] + [0]) + 1
         self._limit = limit
+        self.listener = None  # журнал для поддержки: вызывается с каждым новым событием
 
     def add(self, event_type, **data):
         with self._lock:
@@ -31,7 +32,13 @@ class EventLog:
             self._events.append(event)
             if len(self._events) > self._limit:
                 self._events = self._events[-self._limit:]
-            return event
+        listener = self.listener
+        if listener is not None:
+            try:
+                listener(event)
+            except Exception as e:
+                Logger.log("w", "[AIAssistant] Journal listener failed: %s", e)
+        return event
 
     def since(self, after):
         with self._lock:
