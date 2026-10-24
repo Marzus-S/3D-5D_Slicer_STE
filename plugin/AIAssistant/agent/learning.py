@@ -7,6 +7,8 @@ import random
 import threading
 from collections import OrderedDict
 
+from . import materials
+
 # OrderedDict: плагин работает на Python 3.5, где обычный dict порядок не хранит.
 TOPICS = OrderedDict([
     ("mode", "Режим 3D / 5D"),
@@ -245,6 +247,11 @@ def review(data, purpose=None):
 
     if (values.get("infill_pattern") or {}).get("value") == "gyroid":
         add("infill_pattern", "ошибка", "Узор gyroid", "Выберите cubic или triangles.", "infill")
+
+    drying = materials.drying_hint(data.get("material_id"))
+    if drying:
+        add("material", "совет", "Материал гигроскопичен", drying + ". Влажный пруток даёт нити, пузыри и "
+            "слабые слои.", "material", value=data.get("material_name") or data.get("material_id"))
 
     result = {
         "purpose": purpose,

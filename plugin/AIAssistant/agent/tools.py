@@ -27,7 +27,7 @@ from UM.Scene.SceneNode import SceneNode
 from UM.Settings.SettingDefinition import SettingDefinition
 from UM.Settings.Validator import ValidatorState
 
-from . import advisor, geometry, knowledge, learning, passport
+from . import advisor, geometry, knowledge, learning, materials, passport
 from .mainthread import is_main_thread, run_on_main
 from .registry import ToolError
 
@@ -606,6 +606,15 @@ class SlicerTools:
         for item in items:
             del item["_score"]
         return {"extruder": int(extruder or 0), "active": active, "count": len(items), "materials": items}
+
+    def material_info(self, material=None):
+        """Свойства «как напечатано» с источниками; без аргумента — для текущего материала."""
+        if not material:
+            material = run_on_main(lambda: _material_id(_extruder(_global_stack(), 0)))
+        try:
+            return materials.info(material)
+        except ValueError as error:
+            raise ToolError(str(error))
 
     def set_material(self, material_id, extruder=0):
         return run_on_main(self._set_material, material_id, extruder)
@@ -1646,6 +1655,11 @@ def register_tools(registry, tools, learning_tools=None):
     registry.add("list_materials", "Список материалов",
                  "Материалы Stereotech для экструдера с описанием и плотностью. query — поиск по словам среди всех материалов (например «PA», «гибкий», «шестер»).",
                  {"extruder": {"type": "integer", "default": 0}, "query": {"type": "string"}}, tools.list_materials)
+    registry.add("material_info", "Свойства материала",
+                 "Справочник «как напечатано»: прочность вдоль и поперёк слоёв, рабочая температура, сушка, "
+                 "принтблок — у каждого числа метка источника. material — id из list_materials или семейство "
+                 "(pa, petg, abs, asa, pla, flex, pc); без него — текущий материал.",
+                 {"material": {"type": "string"}}, tools.material_info)
     registry.add("set_material", "Выбор материала",
                  "Назначить материал экструдеру по id из list_materials.",
                  {"material_id": {"type": "string"}, "extruder": {"type": "integer", "default": 0}},

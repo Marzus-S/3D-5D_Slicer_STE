@@ -232,6 +232,7 @@ button:disabled { opacity: .45; cursor: default; }
 .msg.assistant li { margin: 2px 0; }
 .msg.assistant code { background: var(--code); padding: 1px 5px; border-radius: 4px; font: 13px var(--mono); }
 .msg.assistant pre { background: var(--code); padding: 10px; border-radius: var(--radius-sm); overflow-x: auto; }
+.msg.assistant a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
 .msg.assistant pre code { background: none; padding: 0; }
 .msg.assistant table { border-collapse: collapse; margin: 8px 0; font-size: 13.5px; }
 .msg.assistant th, .msg.assistant td { border: 1px solid var(--line); padding: 4px 9px; text-align: left; }
