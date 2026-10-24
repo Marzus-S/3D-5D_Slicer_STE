@@ -345,6 +345,7 @@ class SlicerTools:
         self._output_dir_provider = output_dir_provider
         self.watcher = SliceWatcher()
         self.last_model_name = None
+        self.cancel_check = None  # агент ставит функцию «нажали ли Стоп», чтобы прерывать долгие ожидания
 
     # ------------------------------------------------------------------ состояние
 
@@ -866,10 +867,13 @@ class SlicerTools:
 
     # ------------------------------------------------------------------ слайсинг
 
-    def slice(self, wait=True, timeout=900):
+    def slice(self, wait=True, timeout=600):
         if not run_on_main(_scene_nodes):
             raise ToolError("Сцена пуста — нечего нарезать")
         self.watcher.ensure_connected()
+        # После смены настроек слайсер пересчитывает их с задержкой и отменяет уже начатую нарезку —
+        # даём изменениям «осесть» перед запуском.
+        time.sleep(1.5)
 
         def start():
             backend = _app().getBackend()
@@ -881,9 +885,13 @@ class SlicerTools:
         if not wait:
             return {"started": True, "backend": backend_id}
 
-        started = time.time()
-        retried = False
+        started = last_start = time.time()
+        restarts = 0
+        was_processing = False
         while True:
+            if self.cancel_check is not None and self.cancel_check():
+                run_on_main(lambda: _app().getBackend().stopSlicing())
+                raise ToolError("Слайсинг остановлен пользователем")
             state = self.watcher.state
             if state == BackendState.Done:
                 break
@@ -892,12 +900,22 @@ class SlicerTools:
                                 "и настройки без ошибок (get_settings покажет validation).")
             if state == BackendState.Disabled:
                 raise ToolError("Слайсинг недоступен: модель вне области печати или нет объектов для печати.")
-            elapsed = time.time() - started
-            if elapsed > timeout:
+            if state == BackendState.Processing:
+                was_processing = True
+            now = time.time()
+            if now - started > timeout:
                 raise ToolError("Слайсинг не завершился за %d с" % timeout)
-            if not retried and elapsed > 15 and self.watcher.changes == 0:
+            # Нарезку отменили (state вернулся в NotStarted) или она так и не началась — запускаем заново.
+            cancelled = was_processing and state == BackendState.NotStarted
+            silent = self.watcher.changes == 0 and now - last_start > 10
+            if (cancelled or silent) and now - last_start > 3:
+                if restarts >= 5:
+                    raise ToolError("Слайсер несколько раз отменил нарезку — повторите slice через несколько секунд")
+                time.sleep(1.0)
                 run_on_main(start)
-                retried = True
+                restarts += 1
+                last_start = time.time()
+                was_processing = False
             time.sleep(0.25)
 
         time.sleep(1.0)  # информация о времени и материале приходит сразу после Done
@@ -945,22 +963,24 @@ class SlicerTools:
         return target
 
     def export_gcode(self, name=None, path=None):
-        target = self._target_path(name, path, "result.gcode")
+        if is_main_thread():
+            raise ToolError("export_gcode нельзя вызывать из главного потока")
 
-        def write():
+        def ready():
             app = _app()
-            scene = app.getController().getScene()
-            gcode_dict = getattr(scene, "gcode_dict", None) or {}
-            plate = app.getMultiBuildPlateModel().activeBuildPlate
-            if not gcode_dict.get(plate):
-                raise ToolError("G-code ещё не готов — сначала выполните slice")
-            writer = PluginRegistry.getInstance().getPluginObject("GCodeWriter")
-            with open(target, "wt", encoding="utf-8") as stream:
-                ok = writer.write(stream, None)
-            if not ok:
-                raise ToolError("GCodeWriter не смог записать файл: %s" % writer.getInformation())
+            gcode_dict = getattr(app.getController().getScene(), "gcode_dict", None) or {}
+            return bool(gcode_dict.get(app.getMultiBuildPlateModel().activeBuildPlate))
 
-        run_on_main(write, timeout=180)
+        if not run_on_main(ready):
+            raise ToolError("G-code ещё не готов — сначала выполните slice")
+        target = self._target_path(name, path, "result.gcode")
+        writer = PluginRegistry.getInstance().getPluginObject("GCodeWriter")
+        # Пишем из потока агента: миниатюру GCodeWriter сам рисует в главном потоке (call_on_qt_thread)
+        # и ждёт его. Вызов из главного потока повесил бы слайсер намертво.
+        with open(target, "wt", encoding="utf-8") as stream:
+            ok = writer.write(stream, None)
+        if not ok:
+            raise ToolError("GCodeWriter не смог записать файл: %s" % writer.getInformation())
         result = {"path": target}
         result.update(_check_gcode(target))
         return result

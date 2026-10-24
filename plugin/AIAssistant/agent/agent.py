@@ -237,6 +237,7 @@ class Agent:
             model = settings.get("model") or self._auto_model(settings)
             tools_schema = self._registry.llm_tools()
             self._tools.watcher.progress_callback = self._on_progress
+            self._tools.cancel_check = lambda: self._cancel
             guard = _LoopGuard()
 
             for _ in range(MAX_STEPS):
@@ -301,6 +302,7 @@ class Agent:
                 # Роли должны чередоваться — иначе следующий запрос к модели может упасть.
                 messages.append({"role": "assistant", "content": "(запрос не завершён из-за ошибки)"})
             self._tools.watcher.progress_callback = None
+            self._tools.cancel_check = None
             session.updated = time.time()
             try:
                 self._store.save(session)
