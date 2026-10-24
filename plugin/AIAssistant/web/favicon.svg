@@ -4,9 +4,9 @@
   <g clip-path="url(#tile)">
     <rect width="32" height="64" fill="#3b4590"/>
     <rect x="32" width="32" height="64" fill="#6a5ea6"/>
-    <g fill="none" stroke-width="9" stroke-linejoin="miter">
-      <path d="M0 9.5H28.5L16.5 26.5A12.6 12.6 0 1 1 2 50.5" stroke="#eceaf6"/>
-      <path d="M64 9.5H40.5V29.5A12.6 12.6 0 1 1 35.5 52.5" stroke="#a9cdf2"/>
+    <g fill="none" stroke-width="12" stroke-linejoin="miter">
+      <path d="M0 9H29L17.5 25.5A11.6 11.6 0 1 1 2 50" stroke="#eceaf6"/>
+      <path d="M64 9H41V29A11.6 11.6 0 1 1 36 52" stroke="#a9cdf2"/>
     </g>
   </g>
 </svg>
