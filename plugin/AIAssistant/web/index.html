@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>STE AI Assistant</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <img src="favicon.svg" alt="" class="logo">
+      <div>
+        <div class="brand-title">STE AI Assistant</div>
+        <div class="brand-sub">Подбор режима, материала и настроек печати</div>
+      </div>
+    </div>
+    <div class="state" id="state">
+      <span class="chip" id="chip-printer" title="Принтер">—</span>
+      <span class="chip chip-mode" id="chip-mode" title="Режим печати">—</span>
+      <span class="chip" id="chip-material" title="Материал">—</span>
+      <span class="chip" id="chip-quality" title="Профиль качества">—</span>
+    </div>
+    <div class="actions">
+      <button class="ghost" id="btn-new" title="Начать новый диалог">Новый диалог</button>
+      <button class="ghost" id="btn-settings" title="Настройки подключения к LLM">Настройки</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="chat" id="chat">
+      <div class="welcome" id="welcome">
+        <h1>Опишите задачу печати</h1>
+        <p>Приложите STL/OBJ/3MF и, если есть, фото детали. Ассистент сам выберет режим 3D/5D, материал, профиль
+          и настройки, сориентирует модель, нарежет её и объяснит решения.</p>
+        <div class="examples" id="examples">
+          <button class="example">Кронштейн под нагрузку, PETG, без поддержек</button>
+          <button class="example">Деталь по ТЗ из файла: подбери режим, материал и настройки, нарежь и сохрани проект</button>
+          <button class="example">Проанализируй геометрию модели и предложи лучшую ориентацию</button>
+          <button class="example">Сравни профили по времени печати и расходу материала</button>
+        </div>
+      </div>
+      <div class="messages" id="messages"></div>
+      <div class="thinking hidden" id="thinking"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span id="thinking-text">Ассистент думает…</span></div>
+    </section>
+  </main>
+
+  <footer class="composer" id="composer">
+    <div class="attachments" id="attachments"></div>
+    <div class="input-row">
+      <label class="attach" title="Прикрепить модель или фото">
+        <input type="file" id="file-input" multiple accept=".stl,.obj,.3mf,.jpg,.jpeg,.png">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M16.5 6.5l-7.8 7.8a2 2 0 102.8 2.8l7.8-7.8a4 4 0 10-5.7-5.7l-7.8 7.8a6 6 0 108.5 8.5l6.4-6.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      </label>
+      <textarea id="input" rows="1" placeholder="Например: «Колесо конвейера, нагрузка 18 кг, контакт со спиртом» — Enter для отправки, Shift+Enter — новая строка"></textarea>
+      <button class="primary" id="btn-send">Отправить</button>
+      <button class="danger hidden" id="btn-stop">Стоп</button>
+    </div>
+    <div class="hint">Файлы можно перетащить в окно. Результаты сохраняются в папку из настроек.</div>
+  </footer>
+
+  <div class="drop-overlay hidden" id="drop-overlay">Отпустите файлы, чтобы прикрепить</div>
+
+  <div class="modal hidden" id="settings">
+    <div class="modal-card">
+      <h2>Подключение к LLM</h2>
+      <label>URL API (OpenAI-совместимый)
+        <input id="cfg-url" placeholder="https://…/v1">
+      </label>
+      <label>Ключ API
+        <input id="cfg-key" type="password" autocomplete="off" placeholder="sk-…">
+      </label>
+      <label>Модель
+        <input id="cfg-model" placeholder="оставьте пустым — возьмём первую из /models" list="model-list">
+        <datalist id="model-list"></datalist>
+      </label>
+      <label>Папка результатов
+        <input id="cfg-out">
+      </label>
+      <label class="check"><input type="checkbox" id="cfg-ssl"> Проверять SSL-сертификат</label>
+      <div class="cfg-info" id="cfg-info"></div>
+      <div class="modal-actions">
+        <button class="ghost" id="cfg-test">Проверить подключение</button>
+        <span class="spacer"></span>
+        <button class="ghost" id="cfg-cancel">Закрыть</button>
+        <button class="primary" id="cfg-save">Сохранить</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
