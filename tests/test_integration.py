@@ -558,6 +558,29 @@ check("passport: hashes", saved["part"]["model"]["sha256"] == hashlib.sha256(ope
 check("passport: rationale in settings", saved["settings"][0]["why"] == "нагрузка на кручение"
       and saved["rationale"] == {"mode": "так быстрее"})
 check("passport: mode not duplicated in settings", [s["key"] for s in saved["settings"]] == ["wall_line_count"])
+
+# ---------------- сжатие истории с выжимками и второй шанс после зацикливания ----------------
+analysis_payload = {"size_mm": {"x": 33, "y": 33, "z": 10}, "five_axis": spur_5d,
+                    "preflight": V.preflight(spur, G.mesh_health(spur["triangles"]), numpy.zeros(0))}
+digest = A._digest("analyze_model", analysis_payload)
+check("digest keeps advisor verdict", "verdict=3d" in digest and "зубчатый венец" in digest, digest)
+check("digest of materials lists ids", "enduse_pa6" in A._digest("list_materials", {"materials": [{"id": "enduse_pa6"}]}))
+long_tool = {"role": "tool", "tool_call_id": "c9", "content": json.dumps(analysis_payload, ensure_ascii=False) + " " * 4000}
+check("compaction uses digest", A._compact(long_tool, 500, {"c9": digest})["content"] == digest)
+check("compaction without digest truncates", A._compact(long_tool, 500)["content"].endswith("…(сокращено)"))
+fitted = A._fit_history([{"role": "user", "content": "x"}, {"role": "assistant", "content": "", "tool_calls": [{}]},
+                         long_tool, {"role": "assistant", "content": "", "tool_calls": [{}]},
+                         {"role": "tool", "tool_call_id": "c10", "content": "{}"}],
+                        {"role": "system", "content": "s"}, 0, 3000, {"c9": digest})
+check("history fit keeps verdict for old analysis", "verdict=3d" in fitted[2]["content"])
+g2 = A._LoopGuard()
+broken = {"function": {"name": "set_settings", "arguments": "{}"}}
+for _ in range(3):
+    g2.record(broken, '{"error": "нет такой настройки"}')
+check("loop guard counts repeated failures", bool(g2.check(broken)))
+g2.tripped = True
+g2.relax()
+check("loop guard relax gives second chance", not g2.tripped and g2.check(same) is None)
 check("passport: mode differs from advice noted", any("5D-советника" in n for n in saved["notes"]), str(saved["notes"]))
 check("passport: markdown sections", all(s in markdown for s in ("## Решения", "## 5D-советник", "## Изменённые настройки",
                                                                  "## Заполняет технолог", "mock-gemma", "Колесо конвейера")))

@@ -24,6 +24,10 @@ READ_ONLY_TOOLS = {"get_printer_state", "analyze_model", "list_objects", "list_m
 HISTORY_LIMIT = 70
 MAX_ATTACHMENT_BYTES = 120 * 1024 * 1024
 MODEL_EXTENSIONS = (".stl", ".obj", ".3mf")
+FORCE_DECISION = ("Данных достаточно, дальше доступен только apply_plan. Прими решение по уже полученным результатам: "
+                  "вызови apply_plan (режим по five_axis.verdict, материал из list_materials, профиль, ориентация, "
+                  "ключевые настройки, name, rationale) и затем дай итог. Если без ответа пользователя решить нельзя — "
+                  "задай один вопрос в формате «Варианты: …».")
 IMAGE_EXTENSIONS = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
 
 
@@ -49,6 +53,7 @@ class Agent:
         self._cancel = False
         self._request_id = 0
         self._last_progress = (0.0, 0.0)
+        self._digests = {}  # tool_call_id → выжимка результата для сжатой истории
 
     @property
     def busy(self):
@@ -248,8 +253,18 @@ class Agent:
             self._tools.watcher.progress_callback = self._on_progress
             self._tools.cancel_check = lambda: self._cancel
             guard = _LoopGuard()
+            forced = False
 
             for _ in range(MAX_STEPS):
+                if guard.tripped and not forced and messages and messages[-1].get("role") == "tool" \
+                        and any(t["function"]["name"] == "apply_plan" for t in tools_schema):
+                    # Модель кружит в сборе данных: один раз оставляем ей только apply_plan — решить или спросить.
+                    forced = True
+                    guard.relax()
+                    messages[-1] = dict(messages[-1], content=messages[-1]["content"] + "\n\n" + FORCE_DECISION)
+                    tools_schema = [t for t in tools_schema if t["function"]["name"] == "apply_plan"]
+                    self._events.add("status", text="Агент долго собирал данные — прошу принять решение по уже собранному")
+                    continue
                 if guard.tripped:
                     self._events.add("error", text="Агент начал повторять одни и те же действия и остановлен. "
                                                    "Проверьте, что модель прикреплена, или уточните задачу.")
@@ -332,7 +347,7 @@ class Agent:
         budget = REQUEST_BUDGET
         for attempt in range(1, 4):
             system = self._system_message(mode)
-            history = _fit_history(self._history(messages), system, tools_size, budget)
+            history = _fit_history(self._history(messages), system, tools_size, budget, self._digests)
             try:
                 return llm.chat(settings["base_url"], settings["api_key"], model,
                                 [system] + history, tools_schema,
@@ -402,6 +417,9 @@ class Agent:
                              base=advice.get("base_diameter_mm"), blockers=advice.get("blockers") or [],
                              decide=advice.get("decide"))
 
+        digest = _digest(name, payload) if ok else None
+        if digest:
+            self._digests[call["id"]] = digest
         text = json.dumps(payload, ensure_ascii=False)
         if len(text) > MAX_TOOL_RESULT_CHARS:
             text = text[:MAX_TOOL_RESULT_CHARS] + "…(обрезано)"
@@ -453,6 +471,12 @@ class _LoopGuard:
             self._seen = {}  # что-то изменили — повторное чтение снова имеет смысл
             if call["function"]["name"] != "reset_settings":
                 self._reads = 0
+        if result_text.startswith('{"error"'):
+            name = call["function"]["name"]
+            self._fails = self._fails + 1 if name == self._fail_tool else 1
+            self._fail_tool = name
+        else:
+            self._fail_tool, self._fails = None, 0
 
     def decision_hint(self):
         """Модель долго только читает и ничего не применяет — подсказываем перейти к apply_plan."""
@@ -460,13 +484,11 @@ class _LoopGuard:
             return ("Данных уже достаточно. Хватит исследовать: прими решение и сразу вызови apply_plan "
                     "(режим, материал, профиль, ориентация, ключевые настройки, name).")
         return None
-        failed = result_text.startswith('{"error"')
-        if failed:
-            name = call["function"]["name"]
-            self._fails = self._fails + 1 if name == self._fail_tool else 1
-            self._fail_tool = name
-        else:
-            self._fail_tool, self._fails = None, 0
+
+    def relax(self):
+        """Второй шанс после срабатывания: счётчики с нуля, пока модель принимает решение."""
+        self._seen, self._last, self._same, self._warnings = {}, None, 0, 0
+        self.tripped = False
 
     def _warn(self, text):
         self._warnings += 1
@@ -475,7 +497,7 @@ class _LoopGuard:
         return text
 
 
-def _fit_history(history, system, tools_size, budget):
+def _fit_history(history, system, tools_size, budget, digests=None):
     """Сжимает результаты инструментов (кроме двух последних сообщений), пока запрос не влезет в бюджет."""
     def size(items):
         return tools_size + len(json.dumps([system] + items, ensure_ascii=False).encode("utf-8"))
@@ -488,7 +510,7 @@ def _fit_history(history, system, tools_size, budget):
     candidate = history
     for limit in (None, 2000, 1000, 500, 250):
         if limit is not None:
-            candidate = [_compact(m, limit) if i < keep else m for i, m in enumerate(history)]
+            candidate = [_compact(m, limit, digests) if i < keep else m for i, m in enumerate(history)]
         if size(candidate) <= budget:
             return candidate
     # Совсем длинный диалог: отбрасываем старые ходы, начиная новый срез с сообщения пользователя.
@@ -499,14 +521,42 @@ def _fit_history(history, system, tools_size, budget):
     return candidate
 
 
-def _compact(message, limit=1500):
-    """Укорачивает длинные результаты инструментов, чтобы запрос влез в лимит модели."""
+def _compact(message, limit=1500, digests=None):
+    """Укорачивает длинные результаты инструментов, чтобы запрос влез в лимит модели. Если для результата есть
+    выжимка (вердикт советника, список материалов), подставляем её: обрезок теряет главное, и модель
+    перезапрашивает тот же инструмент по кругу."""
     content = message.get("content")
     if message.get("role") == "tool" and isinstance(content, str) and len(content) > limit:
         shorter = dict(message)
-        shorter["content"] = content[:limit] + "…(сокращено)"
+        digest = (digests or {}).get(message.get("tool_call_id"))
+        if digest and len(digest) < len(content):
+            shorter["content"] = digest
+        else:
+            shorter["content"] = content[:limit] + "…(сокращено)"
         return shorter
     return message
+
+
+def _digest(name, payload):
+    """Выжимка результата для сжатой истории — то, ради чего инструмент вызывали."""
+    if not isinstance(payload, dict):
+        return None
+    if name == "analyze_model" and payload.get("five_axis"):
+        advice, preflight = payload["five_axis"], payload.get("preflight") or {}
+        lines = ["analyze_model (сжато, повторно не вызывай): габарит %s мм" % json.dumps(payload.get("size_mm")),
+                 "five_axis: verdict=%s, mode=%s, score=%s, base_diameter_mm=%s" % (
+                     advice.get("verdict"), advice.get("mode"), advice.get("score"), advice.get("base_diameter_mm"))]
+        lines += ["запрет 5D: %s" % b for b in advice.get("blockers") or []]
+        lines += ["%+d %s" % (f["points"], f["why"][:90]) for f in advice.get("factors") or []]
+        if advice.get("decide"):
+            lines.append("decide: " + advice["decide"])
+        lines.append("preflight: %s" % preflight.get("summary"))
+        lines += ["%s: %s" % (c["level"], c["text"][:140]) for c in preflight.get("checks") or [] if c["level"] != "ok"]
+        return "\n".join(lines)
+    if name == "list_materials" and payload.get("materials"):
+        return ("list_materials (сжато; описания — вызовом с query): " +
+                ", ".join(m.get("id", "") for m in payload["materials"]))
+    return None
 
 
 def _text_content(content):
