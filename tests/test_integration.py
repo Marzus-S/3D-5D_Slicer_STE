@@ -514,7 +514,8 @@ state = {"printer": "Stereotech Hybrid 530 V5.2.4", "printer_definition": "hte53
          "printing_mode": "classic", "printing_mode_label": "3D", "quality": "Normal", "quality_type": "normal",
          "material": {"id": "enduse_pa6", "name": "Enduse PA6", "brand": "Stereotech", "density": 1.14},
          "nozzle": "0.4", "objects": [{"name": "Колесо", "size_mm": {"x": 40, "y": 40, "z": 40}, "scale_percent": 100}],
-         "settings": [{"key": "wall_line_count", "label": "Wall Line Count", "value": 5, "unit": ""}],
+         "settings": [{"key": "wall_line_count", "label": "Wall Line Count", "value": 5, "unit": ""},
+                      {"key": "printing_mode", "label": "Printing Mode", "value": "classic", "unit": ""}],
          "result": {"print_time": "2 ч 05 мин", "total_weight_g": 48.3}}
 record = P.build(state, model_path=model_file, analysis={"preflight": {"checks": list(roller_checks.values())},
                                                          "five_axis": roller_5d},
@@ -529,6 +530,7 @@ check("passport: files written", saved["format"] == "ste-ai-recipe/1" and saved[
 check("passport: hashes", saved["part"]["model"]["sha256"] == hashlib.sha256(open(model_file, "rb").read()).hexdigest())
 check("passport: rationale in settings", saved["settings"][0]["why"] == "нагрузка на кручение"
       and saved["rationale"] == {"mode": "так быстрее"})
+check("passport: mode not duplicated in settings", [s["key"] for s in saved["settings"]] == ["wall_line_count"])
 check("passport: mode differs from advice noted", any("5D-советника" in n for n in saved["notes"]), str(saved["notes"]))
 check("passport: markdown sections", all(s in markdown for s in ("## Решения", "## 5D-советник", "## Изменённые настройки",
                                                                  "## Заполняет технолог", "mock-gemma", "Колесо конвейера")))

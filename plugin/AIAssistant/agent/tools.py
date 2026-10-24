@@ -1382,6 +1382,9 @@ def _passport_state():
     except Exception:
         version = None
     mode = global_stack.getProperty("printing_mode", "value")
+    nozzle = extruder.variant.getName()
+    if not nozzle or nozzle == "empty":  # у Hybrid 530 нет вариантов сопел — берём диаметр из настроек
+        nozzle = "%s мм" % _jsonable(extruder.getProperty("machine_nozzle_size", "value"))
     return {
         "printer": global_stack.getName(),
         "printer_definition": global_stack.definition.getName(),
@@ -1397,7 +1400,7 @@ def _passport_state():
             ("density", properties.get("density")),
             ("description", " ".join((material.getMetaDataEntry("description", "") or "").split())[:300]),
         ]),
-        "nozzle": extruder.variant.getName(),
+        "nozzle": nozzle,
         "settings": settings,
         "objects": [_node_info(n, i) for i, n in enumerate(_scene_nodes())],
     }
@@ -1567,7 +1570,9 @@ def register_tools(registry, tools):
                            "description": "torsion — кручение, pressure — внутреннее давление, rolling — качение и "
                                           "трение по поверхности, centrifugal — центробежная нагрузка на лопатки, "
                                           "bending — изгиб зубьев и рычагов, static — статика или декор"},
-                  "flexible": {"type": "boolean", "default": False}},
+                  "flexible": {"type": "boolean", "default": False,
+                               "description": "true — деталь по назначению должна гнуться (пыльник, сильфон, "
+                                              "уплотнение); ролик или колесо из твёрдого TPU D70 — false"}},
                  tools.analyze_model)
     registry.add("orient_model", "Авто-ориентация",
                  "Автоматически повернуть модель: min_supports — минимум нависаний; max_contact — максимум площади на столе; "

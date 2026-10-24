@@ -315,6 +315,7 @@ class Agent:
                 messages.append({"role": "assistant", "content": "(запрос не завершён из-за ошибки)"})
             self._tools.watcher.progress_callback = None
             self._tools.cancel_check = None
+            self._tools.run_context = {}  # иначе паспорт, сохранённый через внешний MCP, получит задачу из этого чата
             session.updated = time.time()
             try:
                 self._store.save(session)
