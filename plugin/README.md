@@ -45,6 +45,34 @@
 - Можно продолжать диалог: «сделай заполнение 60 % и перенарежь», «сравни профили по времени».
 - **Новый диалог** очищает историю, **Стоп** прерывает агента.
 
+### Режимы чата
+
+Переключатель в шапке — лестница от ученика до профессионала:
+
+| Режим | Для кого | Как ведёт себя ассистент |
+|---|---|---|
+| Обучение | хочет научиться сам | наставник: показывает факты и спрашивает «что бы выбрали вы?», разбирает ваши настройки (`review_my_settings`), после нарезки задаёт квиз |
+| Новичок | только начинает | простые слова, пара уточняющих вопросов, решает сам |
+| Инженер | технолог | кратко и технически, без лишних вопросов |
+| Профи | важна скорость | ответ таблицей, рецепты вместо подбора, подсказки быстрых команд |
+
+Каждый режим видит свой набор инструментов (`modes` в `register_tools`): квиз не нужен профи, рецепты — ученику.
+
+### Быстрые команды
+
+Строка, начинающаяся с `/`, выполняется сразу, без нейросети: разбор строки и прямой вызов инструментов.
+Список подсказывается при вводе `/` (Tab — дополнить), полный — `/help`.
+
+```
+/mode 5d   /mat pa6   /profile fine   /infill 40   /walls 5   /layers 6   /supports off
+/set wall_line_count=5 speed_print=40   /orient ось   /slice   /export 01_gear   /save 01_gear
+/saverecipe шестерня-PA6   /recipes   /recipe шестерня 01_gear   /check loaded   /quiz материал
+```
+
+Рецепт сохраняет режим, материал, профиль, ориентацию и изменённые настройки; `/recipe` применяет его как
+`apply_plan` (сброс, настройки, нарезка, G-code и 3MF). Рецепты, прогресс квизов и история чатов лежат
+в папке данных слайсера: `aiassistant_recipes.json`, `aiassistant_progress.json`, `aiassistant_chats/`.
+
 Результаты сохраняются по шаблону сдачи:
 
 ```
@@ -66,7 +94,10 @@
    ├─ agent/registry.py   — реестр инструментов: одна схема и для MCP, и для LLM
    ├─ agent/tools.py      — инструменты над API слайсера (через главный поток Qt)
    ├─ agent/geometry.py   — анализ геометрии на numpy
-   ├─ agent/knowledge.py  — инструкция агента: порядок работы, правила 3D/5D, материалы, настройки
+   ├─ agent/knowledge.py  — инструкция агента: порядок работы, правила 3D/5D, материалы, настройки, режимы чата
+   ├─ agent/learning.py   — банк вопросов квиза, правила разбора настроек ученика, прогресс
+   ├─ agent/recipes.py    — хранилище рецептов
+   ├─ agent/commands.py   — быстрые команды «/…» без LLM
    ├─ agent/llm.py        — клиент OpenAI-совместимого API (Chat Completions + tool calling)
    └─ agent/mainthread.py — безопасный вызов кода в главном потоке (callLater + ожидание)
    ▼
@@ -85,7 +116,9 @@ OpenAI-совместимый API LLM            API STE Slicer (настрой�
 | Режим | `set_printing_mode` (`classic` / `cylindrical` / `cylindrical_full`) |
 | Настройки | `search_settings`, `get_settings`, `set_settings`, `reset_settings` |
 | Модели | `load_model`, `list_objects`, `analyze_model`, `orient_model`, `rotate_model`, `move_model`, `scale_model`, `arrange_all`, `delete_model` |
-| Слайсинг | `slice`, `get_slice_status`, `get_slice_result`, `export_gcode`, `save_project`, `compare_variants` |
+| Слайсинг | `slice`, `get_slice_status`, `get_slice_result`, `export_gcode`, `validate_gcode`, `save_project`, `apply_plan`, `compare_variants` |
+| Рецепты | `save_recipe`, `list_recipes`, `apply_recipe` |
+| Обучение | `review_my_settings`, `quiz` |
 
 Свои функции поверх минимального набора:
 

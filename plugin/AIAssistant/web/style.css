@@ -241,6 +241,21 @@ button:disabled { opacity: .45; cursor: default; }
 .options button { font-size: 13px; padding: 5px 12px; border-radius: 999px; background: var(--panel-2); }
 .options button.picked { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .options-hint { font-size: 12px; color: var(--muted); }
+.fast { margin-top: 6px; font-size: 11.5px; color: var(--muted); }
+
+/* квиз */
+.quiz { margin-left: 40px; background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--brand); border-radius: var(--radius-sm); padding: 10px 14px; box-shadow: var(--shadow); }
+.quiz-topic { font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.quiz-question { font-weight: 600; margin: 4px 0 8px; }
+.quiz-options { display: flex; flex-direction: column; gap: 6px; }
+.quiz-options button { text-align: left; font-size: 13.5px; padding: 7px 12px; border-radius: var(--radius-sm); background: var(--panel-2); }
+.quiz-options button.right { background: var(--accent-soft); border-color: var(--ok); color: var(--text); }
+.quiz-options button.wrong { background: var(--err-soft); border-color: var(--err); color: var(--err); }
+.quiz-options button:disabled { cursor: default; opacity: 1; }
+.quiz-result { margin-top: 8px; font-size: 13.5px; }
+.quiz-result.ok b { color: var(--ok); }
+.quiz-result.err b { color: var(--err); }
+.quiz-score { margin-top: 4px; font-size: 12px; color: var(--muted); }
 
 /* шаги агента */
 .tool {
@@ -308,6 +323,14 @@ textarea:focus, input:focus { outline: 2px solid var(--accent); outline-offset: 
 .attachment button { border: none; background: transparent; padding: 0 6px; color: var(--muted); }
 .hint { font-size: 11.5px; color: var(--muted); margin-top: 5px; }
 
+/* подсказки быстрых команд */
+.commands { display: flex; flex-direction: column; max-height: 240px; overflow-y: auto; margin-bottom: 6px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel); box-shadow: var(--shadow); }
+.command { display: flex; gap: 10px; align-items: baseline; text-align: left; border: none; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; padding: 7px 12px; font-size: 13px; }
+.command:last-child { border-bottom: none; }
+.command:hover, .command.first { background: var(--accent-soft); }
+.command code { font: 12.5px var(--mono); color: var(--brand); white-space: nowrap; }
+.command span { color: var(--muted); }
+
 .drop-overlay { position: fixed; inset: 0; background: rgba(15, 61, 76, .55); color: #fff; font-size: 22px; display: flex; align-items: center; justify-content: center; z-index: 40; pointer-events: none; }
 
 /* ===================== Настройки ===================== */
@@ -352,5 +375,6 @@ textarea:focus, input:focus { outline: 2px solid var(--accent); outline-offset: 
   .composer { padding: 10px 14px 8px; }
   .examples { grid-template-columns: minmax(0, 1fr); }
   .msg { max-width: 92%; }
-  .tool, .progress, .result-card, .saved { margin-left: 0; }
+  .tool, .progress, .result-card, .saved, .quiz { margin-left: 0; }
+  .segmented button { padding: 5px 9px; font-size: 12.5px; }
 }
