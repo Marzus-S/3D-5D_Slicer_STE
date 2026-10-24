@@ -20,7 +20,7 @@ MAX_STEPS = 32
 MAX_TOOL_RESULT_CHARS = 6000
 REQUEST_BUDGET = 40000  # байт на запрос к LLM вместе с инструкцией и описанием инструментов
 READ_ONLY_TOOLS = {"get_printer_state", "analyze_model", "list_objects", "list_materials", "list_quality_profiles",
-                   "search_settings", "get_settings", "get_slice_status", "get_slice_result"}
+                   "search_settings", "get_settings", "get_slice_status", "get_slice_result", "validate_gcode"}
 HISTORY_LIMIT = 70
 MAX_ATTACHMENT_BYTES = 120 * 1024 * 1024
 MODEL_EXTENSIONS = (".stl", ".obj", ".3mf")
@@ -262,7 +262,7 @@ class Agent:
                     break
                 self._events.add("thinking")
                 message = self._chat(settings, model, mode, messages, tools_schema)
-                content = _text_content(message.get("content"))
+                content = _strip_foreign_script(_text_content(message.get("content")))
                 calls = message.get("tool_calls") or []
                 if not calls:
                     calls, content = _inline_tool_calls(content, self._registry)
@@ -504,6 +504,14 @@ def _text_content(content):
     if isinstance(content, list):
         return "".join(part.get("text", "") for part in content if isinstance(part, dict))
     return str(content)
+
+
+# qwen изредка вставляет в русский текст китайские слова («核心区 под нагруженный профиль»).
+_FOREIGN_SCRIPT = re.compile(r"[　-〿぀-ヿ㐀-䶿一-鿿가-힯＀-￯]+")
+
+
+def _strip_foreign_script(text):
+    return _FOREIGN_SCRIPT.sub("", text) if text else text
 
 
 _INLINE_PATTERNS = [

@@ -27,7 +27,7 @@ from UM.Scene.SceneNode import SceneNode
 from UM.Settings.SettingDefinition import SettingDefinition
 from UM.Settings.Validator import ValidatorState
 
-from . import geometry
+from . import geometry, knowledge
 from .mainthread import is_main_thread, run_on_main
 from .registry import ToolError
 
@@ -139,6 +139,69 @@ def _validation(stack, definition):
             return None
         return state.value
     except Exception:
+        return None
+
+
+def _number(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _range_problem(stack, key, value, material_id=None):
+    """Жёсткие границы: min/max самой настройки и паспорт материала из knowledge. Возвращает
+    (ошибка, предупреждение): при ошибке значение не применяется, предупреждение только сообщается."""
+    number = _number(value)
+    if number is None or isinstance(value, bool):
+        return None, None
+    low, high = _number(stack.getProperty(key, "minimum_value")), _number(stack.getProperty(key, "maximum_value"))
+    passport = knowledge.material_limits(material_id).get(key)
+    if passport:
+        low = passport[0] if low is None else max(low, passport[0])
+        high = passport[1] if high is None else min(high, passport[1])
+    if (low is not None and number < low) or (high is not None and number > high):
+        return "значение %s вне допустимого диапазона [%s; %s]" % (
+            _jsonable(value), "—" if low is None else _jsonable(low), "—" if high is None else _jsonable(high)), None
+    warn_low = _number(stack.getProperty(key, "minimum_value_warning"))
+    warn_high = _number(stack.getProperty(key, "maximum_value_warning"))
+    if (warn_low is not None and number < warn_low) or (warn_high is not None and number > warn_high):
+        return None, "вне рекомендуемого диапазона [%s; %s]" % (
+            "—" if warn_low is None else _jsonable(warn_low), "—" if warn_high is None else _jsonable(warn_high))
+    return None, None
+
+
+def _material_id(stack):
+    material = getattr(stack, "material", None)
+    if material is None or material.getId() == "empty_material":
+        material = _extruder(_global_stack(), 0).material
+    return material.getMetaDataEntry("base_file", material.getId())
+
+
+def _flow_check(global_stack):
+    """Объёмный расход Q = v × h × w (мм³/с) против ориентира хотэнда для материала из knowledge."""
+    try:
+        stack = _extruder(global_stack, 0)
+        speed = max(_number(stack.getProperty("speed_print", "value")) or 0,
+                    _number(stack.getProperty("speed_infill", "value")) or 0)
+        height_key = "layer_height"
+        if global_stack.getProperty("printing_mode", "value") != "classic" and \
+                global_stack.getProperty("cylindrical_layer_height", "value") is not None:
+            height_key = "cylindrical_layer_height"
+        height = _number(global_stack.getProperty(height_key, "value"))
+        width = _number(stack.getProperty("line_width", "value"))
+        if not (speed and height and width):
+            return None
+        flow = speed * height * width
+        limit = knowledge.max_volumetric_flow(_material_id(stack))
+        result = {"volumetric_flow_mm3_s": round(flow, 1), "limit_mm3_s": limit,
+                  "formula": "Q = %g мм/с × %g мм × %g мм" % (speed, height, width)}
+        if flow > limit:
+            result["warning"] = ("Q выше ориентира для материала: недоэкструзия и слабое спекание слоёв. "
+                                 "Снизьте скорость до ≈ %d мм/с" % int(limit / (height * width)))
+        return result
+    except Exception as e:
+        Logger.log("w", "[AIAssistant] flow check failed: %s", e)
         return None
 
 
@@ -669,6 +732,10 @@ class SlicerTools:
                 stacks = [_extruder(global_stack, extruder)] if extruder is not None else _extruders(global_stack)
             else:
                 stacks = [global_stack]
+            out_of_range, warning = _range_problem(stacks[0], key, value, _material_id(stacks[0]))
+            if out_of_range:
+                errors.append({"key": key, "error": out_of_range + " — значение не применено"})
+                continue
             old = _jsonable(stacks[0].getProperty(key, "value"))
             for stack in stacks:
                 stack.userChanges.setProperty(key, "value", value)
@@ -677,8 +744,14 @@ class SlicerTools:
             problem = _validation(stacks[0], definition)
             if problem:
                 entry["validation"] = problem
+            if warning:
+                entry["warning"] = warning
             changed.append(entry)
-        return {"changed": changed, "errors": errors}
+        result = {"changed": changed, "errors": errors}
+        flow = _flow_check(global_stack)
+        if flow:
+            result["flow"] = flow
+        return result
 
     def reset_settings(self, keys=None):
         return run_on_main(self._reset_settings, keys)
@@ -987,12 +1060,15 @@ class SlicerTools:
         weights = [round(float(w), 1) for w in (info.materialWeights or [])]
         lengths = [round(float(l), 2) for l in (info.materialLengths or [])]
         names = [str(n) for n in (info.materialNames or [])]
+        # Только реально использованные материалы с подписью: голый массив [0, 168.2] модель читала
+        # как «печатает второй экструдер», хотя порядок у PrintInformation свой.
+        used = [{"material": names[i] if i < len(names) else "материал %d" % (i + 1),
+                 "weight_g": weights[i], "length_m": lengths[i] if i < len(lengths) else None}
+                for i in range(len(weights)) if weights[i] > 0]
         return {
             "print_time_seconds": seconds,
             "print_time": _format_duration(seconds),
-            "material_weight_g": weights,
-            "material_length_m": lengths,
-            "material_names": names,
+            "materials_used": used,
             "total_weight_g": round(sum(weights), 1),
             "printing_mode": _global_stack().getProperty("printing_mode", "value"),
         }
@@ -1028,7 +1104,19 @@ class SlicerTools:
         if not ok:
             raise ToolError("GCodeWriter не смог записать файл: %s" % writer.getInformation())
         result = {"path": target}
-        result.update(_check_gcode(target))
+        result.update(_check_gcode(target, run_on_main(_gcode_limits)))
+        self.last_gcode_path = target
+        return result
+
+    def validate_gcode(self, path=None):
+        path = path or getattr(self, "last_gcode_path", None)
+        if not path:
+            raise ToolError("Нет пути: сначала export_gcode или передайте path")
+        path = os.path.abspath(os.path.expanduser(str(path)))
+        if not os.path.isfile(path):
+            raise ToolError("Файл не найден: %s" % path)
+        result = {"path": path}
+        result.update(_check_gcode(path, run_on_main(_gcode_limits)))
         return result
 
     def save_project(self, name=None, path=None):
@@ -1069,6 +1157,12 @@ class SlicerTools:
                 done["settings"] = {c["key"]: c["new"] for c in applied["changed"]}
                 if applied["errors"]:
                     done["settings_errors"] = applied["errors"]
+                warnings = {c["key"]: c["warning"] for c in applied["changed"] if c.get("warning")}
+                if warnings:
+                    done["settings_warnings"] = warnings
+            flow = run_on_main(lambda: _flow_check(_global_stack()))
+            if flow:
+                done["flow"] = flow
             done["slice"] = self.slice(wait=True)
             done["gcode"] = self.export_gcode(name=name)
             done["project"] = self.save_project(name=name)
@@ -1085,6 +1179,7 @@ class SlicerTools:
             "gcode_path": gcode["path"],
             "gcode_valid": gcode["valid"],
             "gcode_issues": gcode["issues"],
+            "gcode_warnings": gcode["warnings"],
             "project_path": done["project"]["path"],
         }
 
@@ -1192,35 +1287,108 @@ def _resolve_model_path(path):
                     "скрепкой в чате (вложения загружаются автоматически) или прислать полный путь." % raw)
 
 
-def _check_gcode(path):
-    """Быстрая проверка корректности G-code: есть ли движения, слои, температуры."""
+def _gcode_limits():
+    """Границы для проверки G-code: стол, режим и температуры из стека настроек (главный поток)."""
+    global_stack = _global_stack()
+    extruder = _extruder(global_stack, 0)
+
+    def number(stack, key, prop="value"):
+        return _number(stack.getProperty(key, prop))
+
+    return {
+        "width": number(global_stack, "machine_width"),
+        "depth": number(global_stack, "machine_depth"),
+        "height": number(global_stack, "machine_height"),
+        "center_is_zero": bool(global_stack.getProperty("machine_center_is_zero", "value")),
+        "printing_mode": global_stack.getProperty("printing_mode", "value"),
+        "nozzle_temp": number(extruder, "material_print_temperature"),
+        "nozzle_max": number(extruder, "material_print_temperature", "maximum_value"),
+        "bed_max": number(global_stack, "material_bed_temperature", "maximum_value"),
+    }
+
+
+def _axis_values(line):
+    values = {}
+    for token in line.split(";", 1)[0].split()[1:]:
+        if token[:1] in "XYZAC":
+            try:
+                values[token[0]] = float(token[1:])
+            except ValueError:
+                pass
+    return values
+
+
+def _check_gcode(path, limits=None):
+    """Проверка G-code: движения и слои, границы стола, температуры, поворотные оси в 5D, парковка.
+    issues — то, что делает файл непригодным; warnings — что стоит посмотреть глазами."""
     moves = layers = 0
-    has_temperature = has_flavor = False
-    header = []
+    has_flavor = False
+    header, tail = [], []
+    low, high = {}, {}
+    nozzle, bed = [], []
     with open(path, "rt", encoding="utf-8", errors="replace") as stream:
         for number, line in enumerate(stream):
             if number < 40 and line.startswith(";") and len(header) < 12:
                 header.append(line.strip())
             if line.startswith(("G0 ", "G1 ", "G2 ", "G3 ")):
                 moves += 1
+                for axis, value in _axis_values(line).items():
+                    if value < low.get(axis, value + 1):
+                        low[axis] = value
+                    if value > high.get(axis, value - 1):
+                        high[axis] = value
             elif line.startswith(";LAYER:"):
                 layers += 1
-            elif line.startswith(("M104", "M109")):
-                has_temperature = True
+            elif line.startswith(("M104", "M109", "M140", "M190")):
+                match = re.search(r"\bS(\d+(?:\.\d+)?)", line)
+                if match:
+                    (bed if line.startswith(("M140", "M190")) else nozzle).append(float(match.group(1)))
             elif line.startswith(";FLAVOR"):
                 has_flavor = True
-    issues = []
+            if not line.startswith(";SETTING_3"):
+                tail.append(line.strip())
+                if len(tail) > 60:
+                    del tail[0]
+    issues, warnings = [], []
     if moves == 0:
         issues.append("нет команд перемещения")
-    if not has_temperature:
+    if not any(t > 0 for t in nozzle):
         issues.append("нет команд нагрева сопла (M104/M109)")
+    limits = limits or {}
+    mode = limits.get("printing_mode") or "classic"
+    if mode == "classic" and limits.get("width") and limits.get("depth"):
+        for axis, size in (("X", limits["width"]), ("Y", limits["depth"])):
+            start, end = (-size / 2.0, size / 2.0) if limits.get("center_is_zero") else (0.0, size)
+            if axis in low and (low[axis] < start - 1 or high[axis] > end + 1):
+                issues.append("%s выходит за стол: %.1f…%.1f при допустимых %.0f…%.0f мм"
+                              % (axis, low[axis], high[axis], start, end))
+    if limits.get("height") and high.get("Z", 0) > limits["height"] + 1:
+        issues.append("Z до %.1f мм выше рабочей высоты %.0f мм" % (high["Z"], limits["height"]))
+    if mode != "classic" and not ("A" in low or "C" in low):
+        issues.append("режим 5D, но нет движений поворотных осей A/C")
+    if nozzle and limits.get("nozzle_max") and max(nozzle) > limits["nozzle_max"]:
+        issues.append("температура сопла %.0f °C выше предела %.0f °C" % (max(nozzle), limits["nozzle_max"]))
+    if nozzle and limits.get("nozzle_temp") and abs(max(nozzle) - limits["nozzle_temp"]) > 15:
+        warnings.append("температура сопла %.0f °C, а в профиле материала %.0f °C" % (max(nozzle), limits["nozzle_temp"]))
+    if bed and limits.get("bed_max") and max(bed) > limits["bed_max"]:
+        issues.append("температура стола %.0f °C выше предела %.0f °C" % (max(bed), limits["bed_max"]))
+    ending = " ".join(tail)
+    if not re.search(r"\b(END|G28|M84)\b", ending):
+        warnings.append("в конце нет парковки (END, G28 или M84)")
+    if not re.search(r"\bM104 S0\b", ending):
+        warnings.append("в конце не выключается нагрев сопла (M104 S0)")
+    axes = {axis: [round(low[axis], 1), round(high[axis], 1)] for axis in sorted(low)}
     return {
         "size_kb": round(os.path.getsize(path) / 1024.0, 1),
         "moves": moves,
         "layers": layers,
         "has_flavor_header": has_flavor,
+        "axes_range": axes,
+        "nozzle_temp_max": max(nozzle) if nozzle else None,
+        "bed_temp_max": max(bed) if bed else None,
         "header": header,
         "issues": issues,
+        "warnings": warnings,
         "valid": not issues,
     }
 
@@ -1308,6 +1476,10 @@ def register_tools(registry, tools):
                  "Сохранить G-code (по умолчанию <папка результатов>/<name>/result.gcode) и проверить его корректность.",
                  {"name": {"type": "string", "description": "Имя папки, обычно имя модели"}, "path": {"type": "string"}},
                  tools.export_gcode)
+    registry.add("validate_gcode", "Проверка G-code",
+                 "Проверить G-code по текущим настройкам: стол, высота, температуры сопла и стола, поворотные оси A/C в 5D, "
+                 "парковка в конце. Без path — последний экспортированный файл.",
+                 {"path": {"type": "string"}}, tools.validate_gcode)
     registry.add("save_project", "Сохранение 3MF",
                  "Сохранить проект 3MF со всеми настройками (по умолчанию <папка результатов>/<name>/project.3mf).",
                  {"name": {"type": "string"}, "path": {"type": "string"}}, tools.save_project)
