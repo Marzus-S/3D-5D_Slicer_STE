@@ -312,6 +312,7 @@ class SliceWatcher:
         self.changes = 0
         self.progress_callback = None
         self.last_setting_change = 0.0
+        self.last_activity = 0.0
 
     def ensure_connected(self):
         """Подключает слушатели; True — если слежение за настройками только что началось."""
@@ -359,6 +360,7 @@ class SliceWatcher:
                 return
             self.state = state
             self.changes += 1
+            self.last_activity = time.time()
 
     def on_progress(self, backend_id, amount):
         with self._lock:
@@ -366,6 +368,7 @@ class SliceWatcher:
                 return
             self.progress = float(amount)
             self.changes += 1
+            self.last_activity = time.time()
         callback = self.progress_callback
         if callback is not None:
             try:
@@ -946,7 +949,12 @@ class SlicerTools:
             # Нарезку отменили (state вернулся в NotStarted) или она так и не началась — запускаем заново.
             cancelled = was_processing and state == BackendState.NotStarted
             silent = self.watcher.changes == 0 and now - last_start > 10
-            if (cancelled or silent) and now - last_start > 3:
+            # Движок слайсера иногда «замолкает» посреди 5D-нарезки: ни прогресса, ни смены состояния.
+            stalled = state == BackendState.Processing and now - max(self.watcher.last_activity, last_start) > 240
+            if stalled:
+                Logger.log("w", "[AIAssistant] Slicing stalled, restarting")
+                run_on_main(lambda: _app().getBackend().stopSlicing())
+            if (cancelled or silent or stalled) and now - last_start > 3:
                 if restarts >= 5:
                     raise ToolError("Слайсер несколько раз отменил нарезку — повторите slice через несколько секунд")
                 self.watcher.wait_settled()
