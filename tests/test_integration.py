@@ -599,6 +599,13 @@ for _ in range(3):
 check("loop guard counts repeated failures", bool(g2.check(broken)))
 g2.tripped = True
 g2.relax()
+g3 = A._LoopGuard()
+hits = []
+for word in ("PA", "нейлон", "полиамид", "износ"):
+    lookup = {"function": {"name": "list_materials", "arguments": json.dumps({"query": word})}}
+    hits.append(bool(g3.check(lookup)))
+    g3.record(lookup, '{"materials": []}')
+check("loop guard limits material search", hits == [False, False, False, True], str(hits))
 check("loop guard relax gives second chance", not g2.tripped and g2.check(same) is None)
 
 # ---------------- после готового плана — только итог ----------------

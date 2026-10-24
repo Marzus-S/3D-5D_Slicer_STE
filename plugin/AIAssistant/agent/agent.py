@@ -573,6 +573,11 @@ class Agent:
             self._events.add("progress", value=round(amount, 3))
 
 
+# Поиск материала разными словами не ловится повтором вызова — ограничиваем число поисков за задачу.
+MATERIAL_LOOKUPS = ("list_materials", "material_info")
+MAX_MATERIAL_LOOKUPS = 3
+
+
 class _LoopGuard:
     """Не даёт модели крутиться на месте: повтор того же вызова и серия неудач одного инструмента."""
 
@@ -584,6 +589,7 @@ class _LoopGuard:
         self._fail_tool = None
         self._fails = 0
         self._warnings = 0
+        self._materials = 0
         self.tripped = False
 
     def check(self, call):
@@ -595,6 +601,9 @@ class _LoopGuard:
         if signature == self._last and self._same >= 2:
             return self._warn("Этот вызов уже выполнялся несколько раз с теми же аргументами — результат не изменится. "
                               "Не повторяй его: переходи к следующему шагу или объясни пользователю, что мешает.")
+        if call["function"]["name"] in MATERIAL_LOOKUPS and self._materials >= MAX_MATERIAL_LOOKUPS:
+            return self._warn("Материалы уже найдены — список и свойства есть выше в истории. Не ищи дальше: "
+                              "выбери лучший из найденных под требования задачи и переходи к apply_plan.")
         if call["function"]["name"] == self._fail_tool and self._fails >= 3:
             return self._warn("Инструмент %s уже несколько раз подряд вернул ошибку. Не пробуй варианты наугад: "
                               "сообщи пользователю, в чём проблема, и спроси, как быть." % self._fail_tool)
@@ -604,6 +613,8 @@ class _LoopGuard:
         signature = (call["function"]["name"], call["function"]["arguments"])
         self._same = self._same + 1 if signature == self._last else 1
         self._last = signature
+        if call["function"]["name"] in MATERIAL_LOOKUPS:
+            self._materials += 1
         if call["function"]["name"] in READ_ONLY_TOOLS:
             self._seen[signature] = self._seen.get(signature, 0) + 1
             self._reads += 1

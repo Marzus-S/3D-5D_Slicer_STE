@@ -211,7 +211,7 @@
 
   function avatar() {
     var img = document.createElement("img");
-    img.src = "favicon.svg";
+    img.src = "favicon.svg?v=35";
     img.alt = "";
     img.className = "avatar";
     return img;
