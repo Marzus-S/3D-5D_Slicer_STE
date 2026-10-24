@@ -227,7 +227,14 @@ def five_axis(analysis, load=None, flexible=False, speed=30.0, overlap=0.0, dens
     if revolution["through_bore"] and revolution["bore_diameter"] >= MIN_BASE:
         factor(1, "сквозное отверстие ⌀%s мм — деталь садится базой на ось" % _num(revolution["bore_diameter"], 1))
 
+    teeth = revolution.get("teeth")
     load_key = str(load or "").strip().lower()
+    if teeth:
+        # Момент на шестерне передают зубья: «кручение» из ТЗ для неё — тот же изгиб зуба, второй раз не считаем.
+        factor(-2, "зубчатый венец (≈%d зубьев): момент передаётся изгибом зуба у корня — радиально, поперёк "
+                   "слоёв 5D; плоские слои «лёжа» держат его лучше" % teeth["count"])
+        if load_key in ("torsion", "bending"):
+            load_key = ""
     if load_key in LOADS:
         label, points, why = LOADS[load_key]
         factor(points, "нагрузка — %s: %s" % (label, why))

@@ -139,6 +139,62 @@ def _radial_profile(relative, axis):
     return along, radius, roundness
 
 
+def _section_outline(triangles, axis, center, height, bins=360):
+    """Наибольший радиус наружного контура сечения плоскостью поперёк оси — по угловым корзинам."""
+    d = (triangles - center).dot(axis) - height
+    crossing = (d.min(axis=1) < 0) & (d.max(axis=1) > 0)
+    tri, d = triangles[crossing], d[crossing]
+    if len(tri) == 0:
+        return None
+    # Пересечённая грань даёт ровно две точки — отрезок контура; точки внутри отрезков закрывают пустые углы.
+    points, owners = [], []
+    for i, j in ((0, 1), (1, 2), (2, 0)):
+        cut = (d[:, i] < 0) != (d[:, j] < 0)
+        t = d[cut, i] / (d[cut, i] - d[cut, j])
+        points.append(tri[cut, i] + (tri[cut, j] - tri[cut, i]) * t[:, None])
+        owners.append(numpy.nonzero(cut)[0])
+    points = numpy.concatenate(points)[numpy.argsort(numpy.concatenate(owners), kind="mergesort")]
+    start, end = points[0::2], points[1::2]
+    samples = numpy.concatenate([start + (end - start) * t for t in numpy.linspace(0.0, 1.0, 9)])
+    relative = samples - center
+    radial = relative - numpy.outer(relative.dot(axis), axis)
+    radius = numpy.sqrt((radial ** 2).sum(axis=1))
+    helper = numpy.array([1.0, 0.0, 0.0]) if abs(axis[0]) < 0.9 else numpy.array([0.0, 1.0, 0.0])
+    u = numpy.cross(axis, helper)
+    u /= numpy.linalg.norm(u)
+    v = numpy.cross(axis, u)
+    angles = numpy.arctan2(radial.dot(v), radial.dot(u))
+    index = ((angles + math.pi) / (2 * math.pi) * bins).astype(numpy.int64) % bins
+    outline = numpy.full(bins, -1.0)
+    numpy.maximum.at(outline, index, radius)
+    filled = outline >= 0
+    if not filled.all():
+        # Пустой угол берёт значение ближайшего заполненного перед ним (по кругу).
+        first = int(numpy.nonzero(filled)[0][0])
+        source = numpy.roll(numpy.where(filled, numpy.arange(bins), -1), -first)
+        numpy.maximum.accumulate(source, out=source)
+        outline = outline[numpy.roll(source, first)]
+    return outline
+
+
+def toothed_rim(triangles, axis, center, min_teeth=10, max_depth=0.4):
+    """Зубчатый венец: на одном из сечений наружный радиус периодически проседает не меньше min_teeth раз
+    на глубину 3–40 % радиуса. Лопатки рабочих колёс реже (5–9) и глубже, гладкие колёса — без провалов."""
+    along = (triangles.reshape(-1, 3) - center).dot(axis)
+    low, high = float(along.min()), float(along.max())
+    best = None
+    for fraction in (0.2, 0.35, 0.5, 0.65, 0.8):
+        outline = _section_outline(triangles, axis, center, low + fraction * (high - low))
+        if outline is None or outline.max() <= 0:
+            continue
+        depth = float((outline.max() - outline.min()) / outline.max())
+        above = outline > (outline.max() + outline.min()) / 2.0
+        count = int((above & ~numpy.roll(above, 1)).sum())
+        if count >= min_teeth and 0.03 <= depth <= max_depth and (best is None or count > best["count"]):
+            best = {"count": count, "depth": round(depth, 3)}
+    return best
+
+
 def revolution_info(triangles, areas):
     """Похожа ли деталь на тело вращения, где ось, есть ли сквозное центральное отверстие."""
     centers = triangles.mean(axis=1)
@@ -176,6 +232,7 @@ def revolution_info(triangles, areas):
     through_bore = _line_hits(triangles, mean, axis) == 0
     is_revolution = best_symmetry > 0.85 and roundness > 0.9
     return {
+        "teeth": toothed_rim(triangles, axis, mean) if is_revolution else None,
         "axis": axis,
         "center": mean,
         "symmetry": float(best_symmetry),

@@ -909,6 +909,7 @@ class SlicerTools:
                 "axis_parallel_share": round(revolution["axis_parallel_share"], 2),
                 "through_bore": revolution["through_bore"],
                 "bore_diameter_mm": round(revolution["bore_diameter"], 2),
+                "teeth": (revolution.get("teeth") or {}).get("count"),
             },
             "hints": hints,
         }

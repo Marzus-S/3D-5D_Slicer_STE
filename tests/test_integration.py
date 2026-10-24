@@ -465,6 +465,28 @@ def tube(outer, inner, length, segments=96):
     return oriented(tris, out)
 
 
+def gear(teeth, tip, root, length):
+    """Сплошное зубчатое колесо вдоль оси Y: на зуб четыре точки контура (впадина, вершина, вершина, впадина)."""
+    outline = []
+    for k in range(teeth):
+        step = 2 * math.pi / teeth
+        for frac, r in ((0.0, root), (0.2, tip), (0.5, tip), (0.7, root)):
+            a = (k + frac) * step
+            outline.append((r * math.cos(a), r * math.sin(a)))
+    tris, out = [], []
+    for i in range(len(outline)):
+        (x0, z0), (x1, z1) = outline[i], outline[(i + 1) % len(outline)]
+        mx, mz = (x0 + x1) / 2, (z0 + z1) / 2
+        side = [[x0, 0, z0], [x1, 0, z1], [x1, length, z1], [x0, length, z0]]
+        tris += [[side[0], side[1], side[2]], [side[0], side[2], side[3]]]
+        out += [[z1 - z0 if (z1 - z0) * mx - (x1 - x0) * mz > 0 else z0 - z1, 0,
+                 x0 - x1 if (z1 - z0) * mx - (x1 - x0) * mz > 0 else x1 - x0]] * 2
+        for y, normal in ((0, [0, -1, 0]), (length, [0, 1, 0])):
+            tris.append([[0, y, 0], [x0, y, z0], [x1, y, z1]])
+            out.append(normal)
+    return oriented(tris, out)
+
+
 def inspect(triangles, load=None, flexible=False):
     analysis = G.analyze(triangles.reshape(-1, 3))
     health = G.mesh_health(analysis["triangles"])
@@ -500,6 +522,11 @@ check("5D: shaft sleeve under torsion", roller_5d["verdict"] == "5d" and roller_
 check("preflight: bore tolerance IT12", roller_checks["hole"]["level"] == "info" and "0.21" in roller_checks["hole"]["text"])
 _, _, _, disc_5d = inspect(tube(40, 5, 6), load="bending")
 check("5D: thin disc under bending -> 3D", disc_5d["verdict"] == "3d", str(disc_5d["factors"]))
+spur, _, _, spur_5d = inspect(gear(24, 20, 17, 10), load="torsion")
+check("5D: gear teeth found, torque on teeth is bending -> 3D", spur["revolution"]["teeth"]
+      and spur["revolution"]["teeth"]["count"] == 24 and spur_5d["verdict"] == "3d"
+      and not any("кручение" in f["why"] for f in spur_5d["factors"]), str(spur["revolution"]["teeth"]))
+check("5D: smooth sleeve has no teeth", roller["revolution"]["teeth"] is None)
 _, _, _, soft_5d = inspect(tube(20, 10, 40), flexible=True)
 check("5D: flexible material blocked", soft_5d["verdict"] == "3d" and soft_5d["blockers"])
 _, _, _, plate_5d = inspect(box(40, 5, 25))
