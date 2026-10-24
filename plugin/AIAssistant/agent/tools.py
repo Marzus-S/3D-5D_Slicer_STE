@@ -27,7 +27,7 @@ from UM.Scene.SceneNode import SceneNode
 from UM.Settings.SettingDefinition import SettingDefinition
 from UM.Settings.Validator import ValidatorState
 
-from . import advisor, geometry, knowledge, passport
+from . import advisor, geometry, knowledge, learning, materials, passport
 from .mainthread import is_main_thread, run_on_main
 from .registry import ToolError
 
@@ -49,6 +49,13 @@ KEY_SETTINGS = [
     "speed_print", "material_print_temperature", "material_bed_temperature", "cool_fan_speed",
     "cylindrical_mode_base_diameter",
 ]
+
+# Что смотрит разбор настроек ученика (review_my_settings) помимо его собственных изменений.
+REVIEW_KEYS = [
+    "layer_height", "wall_line_count", "top_layers", "bottom_layers", "infill_sparse_density", "infill_pattern",
+    "support_enable", "adhesion_type", "speed_print",
+]
+ORIENTATIONS = ["min_supports", "max_contact", "axis_vertical", "none"]
 
 # Оси принтера → оси сцены Uranium (в сцене Y смотрит вверх).
 PRINTER_AXES = {"x": Vector(1, 0, 0), "y": Vector(0, 0, -1), "z": Vector(0, 1, 0)}
@@ -471,6 +478,7 @@ class SlicerTools:
         self.last_plan = None        # ориентация и обоснования из apply_plan
         self.run_context = {}        # агент кладёт сюда модель LLM и текст задачи
         self.cancel_check = None  # агент ставит функцию «нажали ли Стоп», чтобы прерывать долгие ожидания
+        self.recipes = None  # RecipeStore, подключает плагин
 
     # ------------------------------------------------------------------ состояние
 
@@ -598,6 +606,15 @@ class SlicerTools:
         for item in items:
             del item["_score"]
         return {"extruder": int(extruder or 0), "active": active, "count": len(items), "materials": items}
+
+    def material_info(self, material=None):
+        """Свойства «как напечатано» с источниками; без аргумента — для текущего материала."""
+        if not material:
+            material = run_on_main(lambda: _material_id(_extruder(_global_stack(), 0)))
+        try:
+            return materials.info(material)
+        except ValueError as error:
+            raise ToolError(str(error))
 
     def set_material(self, material_id, extruder=0):
         return run_on_main(self._set_material, material_id, extruder)
@@ -1253,6 +1270,117 @@ class SlicerTools:
             "project_path": done["project"]["path"],
         }
 
+    # ------------------------------------------------------------------ рецепты
+
+    def _recipe_store(self):
+        if self.recipes is None:
+            raise ToolError("Хранилище рецептов не подключено")
+        return self.recipes
+
+    def save_recipe(self, name, description=None, orientation=None):
+        store = self._recipe_store()
+        snapshot = run_on_main(self._recipe_snapshot)
+        plan = self.last_plan or {}
+        if plan.get("orientation") in ORIENTATIONS:
+            snapshot["orientation"] = plan["orientation"]
+        if orientation in ORIENTATIONS:
+            snapshot["orientation"] = orientation
+        snapshot["rationale"] = dict(plan.get("rationale") or {})  # обоснования уйдут в паспорт при применении
+        try:
+            recipe = store.put(dict(snapshot, name=name, description=str(description or "")))
+        except ValueError as e:
+            raise ToolError(str(e))
+        return {"saved": recipe, "apply": "/recipe %s" % recipe["name"]}
+
+    def _recipe_snapshot(self):
+        global_stack = _global_stack()
+        extruder = _extruder(global_stack, 0)
+        mode = global_stack.getProperty("printing_mode", "value")
+        settings = OrderedDict()
+        for stack in (global_stack, extruder):
+            for key in sorted(stack.userChanges.getAllKeys()):
+                if key != "printing_mode":
+                    settings[key] = _jsonable(stack.userChanges.getProperty(key, "value"))
+        return {
+            "printing_mode": mode,
+            "material_id": _material_id(extruder),
+            "material": extruder.material.getName(),
+            "quality_type": _app().getMachineManager().activeQualityType,
+            "orientation": "min_supports" if mode == "classic" else "axis_vertical",
+            "settings": settings,
+        }
+
+    def list_recipes(self):
+        recipes = self._recipe_store().all()
+        return {"count": len(recipes), "recipes": [{
+            "name": r["name"],
+            "description": r.get("description") or "",
+            "printing_mode": r.get("printing_mode"),
+            "material": r.get("material") or r.get("material_id"),
+            "material_id": r.get("material_id"),
+            "quality_type": r.get("quality_type"),
+            "orientation": r.get("orientation"),
+            "settings": r.get("settings") or {},
+            "used": r.get("used", 0),
+        } for r in recipes]}
+
+    def apply_recipe(self, recipe, name=None, object=None):
+        store = self._recipe_store()
+        try:
+            found = store.get(recipe)
+        except ValueError as e:
+            raise ToolError(str(e))
+        rationale = found.get("rationale") or None
+        result = self.apply_plan(found["printing_mode"], found["material_id"], found.get("quality_type"),
+                                 found.get("orientation") or "min_supports", found.get("settings") or None,
+                                 name, object, rationale)
+        store.mark_used(found["name"])
+        result["recipe"] = found["name"]
+        return result
+
+    # ------------------------------------------------------------------ разбор настроек ученика
+
+    def review_my_settings(self, purpose=None):
+        return learning.review(run_on_main(self._review_data), purpose)
+
+    def _review_data(self):
+        global_stack = _global_stack()
+        extruder = _extruder(global_stack, 0)
+        values = OrderedDict()
+        for key in REVIEW_KEYS:
+            definition = _definition(global_stack, key)
+            if definition is None:
+                continue
+            values[key] = {"label": _label(definition), "unit": definition.unit or "",
+                           "value": _jsonable(_stack_for(global_stack, definition).getProperty(key, "value"))}
+        user = OrderedDict()
+        for stack in (global_stack, extruder):
+            for key in sorted(stack.userChanges.getAllKeys()):
+                user[key] = _jsonable(stack.userChanges.getProperty(key, "value"))
+        problems = []
+        for key, value in user.items():
+            definition = _definition(global_stack, key)
+            if definition is None or key == "printing_mode":
+                continue
+            stack = _stack_for(global_stack, definition)
+            problem = _range_problem(stack, key, value, _material_id(stack))
+            if not problem and _validation(stack, definition):
+                problem = "слайсер отмечает значение %s как ошибочное" % _jsonable(value)
+            if problem:
+                problems.append({"key": key, "label": _label(definition), "error": problem})
+                values.setdefault(key, {"label": _label(definition), "unit": definition.unit or "",
+                                        "value": _jsonable(value)})
+        return {
+            "mode": global_stack.getProperty("printing_mode", "value"),
+            "material_id": _material_id(extruder),
+            "material_name": extruder.material.getName(),
+            "quality": _app().getMachineManager().activeQualityOrQualityChangesName,
+            "values": values,
+            "user_changes": user,
+            "problems": problems,
+            "flow": _flow_check(global_stack),
+        }
+
     # ------------------------------------------------------------------ сравнение вариантов
 
     def compare_variants(self, variants):
@@ -1514,8 +1642,9 @@ def _check_gcode(path, limits=None):
     }
 
 
-def register_tools(registry, tools):
-    """Описания инструментов для MCP и LLM. Описания — на русском, ключи настроек — как в слайсере."""
+def register_tools(registry, tools, learning_tools=None):
+    """Описания инструментов для MCP и LLM. Описания — на русском, ключи настроек — как в слайсере.
+    modes — в каких режимах чата модель видит инструмент (во внешнем MCP доступны все)."""
     obj = {"type": "string", "description": "Номер объекта из list_objects или часть имени. Можно не указывать, если объект один."}
 
     registry.add("get_printer_state", "Состояние слайсера",
@@ -1530,6 +1659,11 @@ def register_tools(registry, tools):
     registry.add("list_materials", "Список материалов",
                  "Материалы Stereotech для экструдера с описанием и плотностью. query — поиск по словам среди всех материалов (например «PA», «гибкий», «шестер»).",
                  {"extruder": {"type": "integer", "default": 0}, "query": {"type": "string"}}, tools.list_materials)
+    registry.add("material_info", "Свойства материала",
+                 "Справочник «как напечатано»: прочность вдоль и поперёк слоёв, рабочая температура, сушка, "
+                 "принтблок — у каждого числа метка источника. material — id из list_materials или семейство "
+                 "(pa, petg, abs, asa, pla, flex, pc); без него — текущий материал.",
+                 {"material": {"type": "string"}}, tools.material_info)
     registry.add("set_material", "Выбор материала",
                  "Назначить материал экструдеру по id из list_materials.",
                  {"material_id": {"type": "string"}, "extruder": {"type": "integer", "default": 0}},
@@ -1641,3 +1775,38 @@ def register_tools(registry, tools):
                  "Нарезать 1–4 варианта настроек и сравнить время и расход материала. "
                  "Вариант: {label, quality_type?, material_id?, settings?}. Исходное состояние восстанавливается.",
                  {"variants": {"type": "array", "items": {"type": "object"}}}, tools.compare_variants, required=["variants"])
+    registry.add("review_my_settings", "Разбор настроек",
+                 "Проверить настройки, которые пользователь выставил сам: диапазоны слайсера и паспорта материала, "
+                 "рекомендации по назначению детали, расход Q, совместимость режима и материала. Возвращает находки "
+                 "с советами — объясни каждую. Ничего не меняет.",
+                 {"purpose": {"type": "string", "enum": list(learning.PURPOSES.keys()),
+                              "description": "назначение детали; без него — функциональная (или гибкая для TPU)"}},
+                 tools.review_my_settings)
+    registry.add("save_recipe", "Сохранение рецепта",
+                 "Сохранить текущие режим, материал, профиль, ориентацию и изменённые настройки как рецепт для "
+                 "повторного применения одним вызовом. Только по просьбе пользователя.",
+                 {"name": {"type": "string"}, "description": {"type": "string"},
+                  "orientation": {"type": "string", "enum": ORIENTATIONS}},
+                 tools.save_recipe, required=["name"], modes=("engineer", "pro"))
+    registry.add("list_recipes", "Список рецептов",
+                 "Сохранённые рецепты: режим, материал, профиль, ориентация, настройки, сколько раз применялись.",
+                 {}, tools.list_recipes, modes=("engineer", "pro"))
+    registry.add("apply_recipe", "Применение рецепта",
+                 "Применить рецепт к загруженной модели как apply_plan: сброс, режим, материал, профиль, ориентация, "
+                 "настройки, слайсинг, G-code и 3MF.",
+                 {"recipe": {"type": "string", "description": "имя рецепта из list_recipes"},
+                  "name": {"type": "string", "description": "имя папки результатов"}, "object": obj},
+                 tools.apply_recipe, required=["recipe"], modes=("engineer", "pro"))
+    if learning_tools is not None:
+        def quiz(topic=None, count=2):
+            try:
+                return learning_tools.quiz(topic, count)
+            except ValueError as e:
+                raise ToolError(str(e))
+
+        registry.add("quiz", "Квиз",
+                     "Показать пользователю 1–3 вопроса с кнопками по теме задачи. Ответ проверяет чат, "
+                     "не повторяй вопросы текстом.",
+                     {"topic": {"type": "string", "enum": list(learning.TOPICS.keys())},
+                      "count": {"type": "integer", "default": 2}},
+                     quiz, modes=("learning", "novice", "engineer"))

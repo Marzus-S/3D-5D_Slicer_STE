@@ -12,7 +12,7 @@ import traceback
 
 from UM.Logger import Logger
 
-from . import knowledge, llm
+from . import commands, knowledge, llm
 from .knowledge import MODE_PROMPTS
 from .sessions import DEFAULT_TITLE, Session
 
@@ -40,8 +40,9 @@ class AgentBusy(Exception):
 
 
 class Agent:
-    def __init__(self, registry, mcp_handler, tools, settings_provider, upload_dir, store):
+    def __init__(self, registry, mcp_handler, tools, settings_provider, upload_dir, store, learning=None):
         self._registry = registry
+        self._learning = learning  # LearningTools: проверка ответов квиза и прогресс ученика
         self._mcp = mcp_handler
         self._tools = tools
         self._settings_provider = settings_provider
@@ -143,7 +144,8 @@ class Agent:
             raise
         self._running_id = session.id
         mode = mode if mode in MODE_PROMPTS else "engineer"
-        threading.Thread(target=self._run, args=(session, text or "", files, mode),
+        target = self._run_command if commands.is_command(text) and not files else self._run
+        threading.Thread(target=target, args=(session, text or "", files, mode),
                          name="AIAssistantAgent", daemon=True).start()
 
     # ------------------------------------------------------------------ вложения
@@ -253,7 +255,7 @@ class Agent:
             settings = self._settings_provider()
             model = settings.get("model") or self._auto_model(settings)
             self._tools.run_context = {"llm_model": model, "mode": mode, "task": _first_user_text(messages)}
-            tools_schema = self._registry.llm_tools()
+            tools_schema = self._registry.llm_tools(mode)
             self._tools.watcher.progress_callback = self._on_progress
             self._tools.cancel_check = lambda: self._cancel
             guard = _LoopGuard()
@@ -334,7 +336,7 @@ class Agent:
                         result_text = json.dumps({"error": warning}, ensure_ascii=False) if warning else self._execute(call)
                         guard.record(call, result_text)
                         hint = guard.decision_hint()
-                        if name == "apply_plan" and not warning:
+                        if name in ("apply_plan", "apply_recipe") and not warning:
                             plan = _applied_plan(result_text)
                             hint = FINISH_HINT if plan is not None else hint
                         if hint and result_text.endswith("}"):
@@ -365,6 +367,77 @@ class Agent:
             self._busy = False
             self._running_id = None
             self._events.add("run_end")
+
+    def _run_command(self, session, text, files, mode):
+        """Быстрая команда: инструменты вызываются напрямую, без LLM. В историю для модели попадают команда
+        и итог, чтобы следующий обычный запрос знал, что поменялось."""
+        self._events = session.events
+        started = time.time()
+        try:
+            if session.title == DEFAULT_TITLE:
+                session.title = " ".join(text.split())[:60]
+            self._events.add("user", text=text, attachments=[], mode=mode)
+            # В паспорт рецепта попадёт сама команда: видно, что деталь собрана по рецепту, без LLM.
+            self._tools.run_context = {"llm_model": None, "mode": mode, "task": text}
+            self._tools.watcher.progress_callback = self._on_progress
+            self._tools.cancel_check = lambda: self._cancel
+
+            def run(name, args):
+                self._request_id += 1
+                return self._invoke(name, args, "cmd_%d" % self._request_id)
+
+            try:
+                reply = commands.execute(text, run)
+            except commands.CommandError as e:
+                reply = "⚠ %s" % e
+            if reply:
+                self._events.add("assistant", text=reply, command_seconds=round(time.time() - started, 1))
+            session.messages.append({"role": "user", "content": text})
+            session.messages.append({"role": "assistant", "content": reply or "(показаны вопросы квиза)"})
+        except Exception as e:
+            Logger.log("e", "[AIAssistant] Command failed: %s\n%s", e, traceback.format_exc())
+            self._events.add("error", text="%s: %s" % (type(e).__name__, e))
+        finally:
+            self._tools.watcher.progress_callback = None
+            self._tools.cancel_check = None
+            self._tools.run_context = {}
+            session.updated = time.time()
+            try:
+                self._store.save(session)
+            except Exception as e:
+                Logger.log("w", "[AIAssistant] Cannot save chat: %s", e)
+            self._busy = False
+            self._running_id = None
+            self._events.add("run_end")
+
+    # ------------------------------------------------------------------ квиз
+
+    def answer_quiz(self, session_id, quiz_event, choice):
+        """Ответ на вопрос квиза по кнопке. Проверяет код, а не модель; повторно ответить нельзя."""
+        if self._learning is None:
+            raise ValueError("Квизы не подключены")
+        session = self._sessions.get(session_id) or self._current()
+        events = session.events.all()
+        question = next((e for e in events if e["type"] == "quiz" and e["id"] == quiz_event), None)
+        if question is None:
+            raise ValueError("Этого вопроса нет в чате")
+        if any(e["type"] == "quiz_answer" and e.get("quiz_event") == quiz_event for e in events):
+            raise ValueError("На этот вопрос уже ответили")
+        result = self._learning.check(question["qid"], choice)
+        session.events.add("quiz_answer", quiz_event=quiz_event, choice=choice, correct=result["correct"],
+                           answer=result["answer"], why=result["why"], score=result["score"])
+        # Последний ответ серии — итог и кнопки «что дальше», чтобы не приходилось писать «продолжай».
+        batch = [e for e in session.events.all() if e["type"] == "quiz" and e.get("batch") == question.get("batch")]
+        answers = {e.get("quiz_event"): e for e in session.events.all() if e["type"] == "quiz_answer"}
+        if question.get("batch") and all(e["id"] in answers for e in batch):
+            session.events.add("quiz_done", right=sum(1 for e in batch if answers[e["id"]]["correct"]),
+                               total=len(batch), topic=question.get("topic_key"), topic_label=question.get("topic"),
+                               score=result["score"])
+        try:
+            self._store.save(session)
+        except Exception as e:
+            Logger.log("w", "[AIAssistant] Cannot save chat: %s", e)
+        return result
 
     def _chat(self, settings, model, mode, messages, tools_schema):
         """Запрос к LLM в пределах бюджета размера. Сервер организаторов рвёт соединение на больших запросах
@@ -409,7 +482,16 @@ class Agent:
                             result=_preview(payload), seconds=0)
             return json.dumps(payload, ensure_ascii=False)
 
-        self._events.add("tool_call", call_id=call["id"], name=name, title=title, args=args)
+        _, payload = self._invoke(name, args, call["id"])
+        text = json.dumps(payload, ensure_ascii=False)
+        if len(text) > MAX_TOOL_RESULT_CHARS:
+            text = text[:MAX_TOOL_RESULT_CHARS] + "…(обрезано)"
+        return text
+
+    def _invoke(self, name, args, call_id):
+        """Вызов инструмента через MCP с карточкой в ленте чата. Возвращает (ok, payload)."""
+        title = self._registry.title(name)
+        self._events.add("tool_call", call_id=call_id, name=name, title=title, args=args)
         started = time.time()
         self._request_id += 1
         response = self._mcp.call_tool(name, args, request_id=self._request_id)
@@ -421,14 +503,14 @@ class Agent:
             payload = result.get("structuredContent")
             if payload is None:
                 payload = {"text": result["content"][0]["text"]}
-        self._events.add("tool_result", call_id=call["id"], name=name, title=title, ok=ok,
+        self._events.add("tool_result", call_id=call_id, name=name, title=title, ok=ok,
                         result=_preview(payload), seconds=round(time.time() - started, 1))
         if ok and name in ("slice", "get_slice_result") and isinstance(payload, dict) and payload.get("print_time"):
             self._events.add("slice_result", print_time=payload.get("print_time"),
                             weight=payload.get("total_weight_g"), mode=payload.get("printing_mode"))
         if ok and name in ("export_gcode", "save_project", "save_passport") and isinstance(payload, dict):
             self._events.add("file_saved", kind=name, path=payload.get("path"))
-        if ok and name == "apply_plan" and isinstance(payload, dict):
+        if ok and name in ("apply_plan", "apply_recipe") and isinstance(payload, dict):
             self._events.add("slice_result", print_time=payload.get("print_time"),
                              weight=payload.get("total_weight_g"), mode=payload.get("printing_mode"))
             self._events.add("file_saved", kind="export_gcode", path=payload.get("gcode_path"))
@@ -442,14 +524,15 @@ class Agent:
                              verdict=advice.get("verdict"), score=advice.get("score"),
                              base=advice.get("base_diameter_mm"), blockers=advice.get("blockers") or [],
                              decide=advice.get("decide"))
-
+        if ok and name == "quiz" and isinstance(payload, dict):
+            for question in payload.get("questions") or []:
+                self._events.add("quiz", qid=question["id"], topic=question["topic_label"],
+                                 topic_key=question["topic"], batch=call_id,
+                                 question=question["question"], options=question["options"])
         digest = _digest(name, payload) if ok else None
         if digest:
-            self._digests[call["id"]] = digest
-        text = json.dumps(payload, ensure_ascii=False)
-        if len(text) > MAX_TOOL_RESULT_CHARS:
-            text = text[:MAX_TOOL_RESULT_CHARS] + "…(обрезано)"
-        return text
+            self._digests[call_id] = digest
+        return ok, payload
 
     def _on_progress(self, amount):
         now = time.time()

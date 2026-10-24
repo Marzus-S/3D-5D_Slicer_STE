@@ -1,4 +1,5 @@
-// SPA чата: история чатов, режимы «новичок / инженер», вложения, шаги агента, прогресс слайсинга, темы.
+// SPA чата: история чатов, режимы «обучение / новичок / инженер / профи», быстрые команды, квизы,
+// вложения, шаги агента, прогресс слайсинга, темы.
 (function () {
   "use strict";
 
@@ -30,17 +31,34 @@
   var lastEventId = 0;
   var busyHere = false;
   var toolCards = {};      // call_id → элемент карточки
+  var quizCards = {};      // id события квиза → карточка
+  var commandList = [];    // быстрые команды из /api/commands
   var progressEl = null;
   var mode = stored("ste-ai-mode", "engineer");
-  var theme = stored("ste-ai-theme", "studio");
+  // Первый запуск — по настройке системы, дальше — выбор пользователя.
+  var prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+  var theme = stored("ste-ai-theme", prefersDark ? "graphite" : "studio");
 
   var MODE_LABELS = { classic: "3D", cylindrical: "5D Spiral", cylindrical_full: "5D" };
+  var CHAT_MODES = ["learning", "novice", "engineer", "pro"];
   var SAVED_LABELS = { export_gcode: "💾 G-code: ", save_project: "💾 Проект 3MF: ", save_passport: "📋 Паспорт рецепта: " };
   var CHECK_MARKS = { ok: "✓", info: "ℹ", warn: "⚠", fail: "✗" };
   var VERDICT_LABELS = { "5d": "5D-советник: печатать в 5D.", "3d": "5D-советник: печатать в 3D.",
     either: "5D-советник: подходят оба режима." };
 
   var WELCOME = {
+    learning: {
+      badge: "Режим: обучение",
+      title: "Научитесь готовить детали сами",
+      text: "Ассистент — наставник: показывает факты о детали и спрашивает, что выбрали бы вы, " +
+        "разбирает ваши настройки и закрепляет знания короткими квизами.",
+      examples: [
+        ["Научи меня готовить шестерню к печати", "Прикреплю STL — веди по шагам, решения за мной"],
+        ["Проверь мои настройки", "Я сам выставил заполнение и стенки"],
+        ["/quiz", "Пара вопросов, чтобы проверить себя"],
+        ["Когда печатать в 5D, а когда в 3D?", "Объясните на примерах"]
+      ]
+    },
     novice: {
       badge: "Режим: новичок",
       title: "Расскажите, что хотите напечатать",
@@ -63,6 +81,18 @@
         ["Деталь по ТЗ: подбери режим, материал и настройки", "Нарежь и сохрани проект"],
         ["Сравни профили Fine и Normal", "По времени печати и расходу материала"],
         ["Проанализируй геометрию модели", "И предложи ориентацию для 3D или 5D"]
+      ]
+    },
+    pro: {
+      badge: "Режим: профи",
+      title: "Быстро: рецепты и команды",
+      text: "Ответ — таблица решений без пояснений. Правки — командами /… за секунду без нейросети, " +
+        "повторные детали — по рецептам одной командой.",
+      examples: [
+        ["/recipes", "Сохранённые рецепты"],
+        ["/recipe ", "Применить рецепт к модели на столе"],
+        ["/state", "Режим, материал, профиль и ключевые настройки"],
+        ["/help", "Все быстрые команды"]
       ]
     }
   };
@@ -98,6 +128,7 @@
   function inline(text) {
     return text
       .replace(/`([^`]+)`/g, "<code>$1</code>")
+      .replace(/\[([^\]]+)\]\((https:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
       .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
       .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, "$1<em>$2</em>");
   }
@@ -251,6 +282,10 @@
         var parsed = splitOptions(event.text);
         var bubble = div("msg assistant", markdown(parsed.body));
         if (parsed.groups.length) renderOptions(bubble, parsed.groups, live);
+        if (event.command_seconds != null) {
+          var seconds = event.command_seconds < 0.1 ? "< 0,1" : String(event.command_seconds).replace(".", ",");
+          bubble.appendChild(div("fast", "⚡ " + escapeHtml(seconds) + " с · без нейросети"));
+        }
         var line = div("row");
         line.appendChild(avatar());
         line.appendChild(bubble);
@@ -308,6 +343,15 @@
       case "file_saved":
         add(div("saved", (SAVED_LABELS[event.kind] || "💾 Файл: ") + "<code>" + escapeHtml(event.path || "") + "</code>"));
         break;
+      case "quiz":
+        renderQuiz(event);
+        break;
+      case "quiz_answer":
+        renderQuizAnswer(event);
+        break;
+      case "quiz_done":
+        renderQuizDone(event, live);
+        break;
       case "preflight": {
         var rows = (event.checks || []).map(function (c) {
           return '<li class="' + escapeHtml(c.level) + '"><span class="mark">' + (CHECK_MARKS[c.level] || "·") +
@@ -332,9 +376,118 @@
     }
   }
 
+  // ---------- квиз: ответ проверяет плагин, не нейросеть ----------
+  function renderQuiz(event) {
+    var card = div("quiz");
+    card.appendChild(div("quiz-topic", "Квиз · " + escapeHtml(event.topic || "")));
+    card.appendChild(div("quiz-question", escapeHtml(event.question || "")));
+    var row = div("quiz-options");
+    (event.options || []).forEach(function (option) {
+      var button = document.createElement("button");
+      button.textContent = option;
+      button.onclick = function () {
+        if (card.classList.contains("answered")) return;
+        Array.prototype.forEach.call(row.children, function (b) { b.disabled = true; });
+        api("/api/quiz", { body: { session: sessionId, event: event.id, choice: option } }).then(function (result) {
+          if (!result.ok) throw new Error(result.error || "Ответ не принят");
+          pollNow();
+        }).catch(function (error) {
+          Array.prototype.forEach.call(row.children, function (b) { b.disabled = false; });
+          add(div("msg error", "⚠ " + escapeHtml(error.message)));
+        });
+      };
+      row.appendChild(button);
+    });
+    card.appendChild(row);
+    quizCards[event.id] = card;
+    add(card);
+  }
+
+  function renderQuizAnswer(event) {
+    var card = quizCards[event.quiz_event];
+    if (!card) return;
+    card.classList.add("answered");
+    Array.prototype.forEach.call(card.querySelectorAll(".quiz-options button"), function (b) {
+      b.disabled = true;
+      if (b.textContent === event.answer) b.classList.add("right");
+      else if (b.textContent === event.choice) b.classList.add("wrong");
+    });
+    var score = event.score || {};
+    card.appendChild(div("quiz-result " + (event.correct ? "ok" : "err"),
+      "<b>" + (event.correct ? "Верно." : "Неверно.") + "</b> " + escapeHtml(event.why || "") +
+      (score.total ? '<div class="quiz-score">Решено ' + score.solved + " из " + score.total +
+        " · уровень: " + escapeHtml(score.level) + "</div>" : "")));
+    scrollDown();
+  }
+
+  // Итог серии вопросов и кнопки «что дальше»: ещё по теме, другая тема или назад к детали.
+  function renderQuizDone(event, live) {
+    var card = div("quiz quiz-done");
+    var score = event.score || {};
+    card.appendChild(div("quiz-question", "Итог: " + event.right + " из " + event.total + " верно" +
+      (event.right === event.total ? ". Отлично!" : ". Разберём ещё?")));
+    if (score.total) card.appendChild(div("quiz-score", "Всего решено " + score.solved + " из " + score.total +
+      " · уровень: " + escapeHtml(score.level)));
+    var row = div("options");
+    var choices = [];
+    if (event.topic) choices.push(["Ещё вопросы: " + (event.topic_label || ""), "/quiz " + event.topic]);
+    choices.push(["Другая тема", "/quiz"]);
+    choices.push(["Вернуться к детали", "Продолжай работу над деталью"]);
+    choices.forEach(function (choice) {
+      var button = document.createElement("button");
+      button.textContent = choice[0];
+      button.disabled = !live;
+      button.onclick = function () {
+        if (busyHere) return;
+        Array.prototype.forEach.call(row.children, function (b) { b.disabled = true; });
+        inputEl.value = choice[1];
+        send();
+      };
+      row.appendChild(button);
+    });
+    card.appendChild(row);
+    add(card);
+  }
+
+  // ---------- быстрые команды ----------
+  function loadCommands() {
+    api("/api/commands").then(function (data) { commandList = data.commands || []; }).catch(function () {});
+  }
+
+  function matchingCommands() {
+    var text = inputEl.value;
+    if (text.charAt(0) !== "/" || /\s/.test(text)) return [];
+    var prefix = text.slice(1).toLowerCase();
+    return commandList.filter(function (c) { return c.name.indexOf(prefix) === 0; });
+  }
+
+  function renderCommands() {
+    var box = $("commands");
+    var items = matchingCommands();
+    box.innerHTML = "";
+    box.classList.toggle("hidden", !items.length);
+    items.forEach(function (command, index) {
+      var item = document.createElement("button");
+      item.className = "command" + (index === 0 ? " first" : "");
+      item.innerHTML = "<code>" + escapeHtml(command.usage) + "</code><span>" + escapeHtml(command.description) + "</span>";
+      item.onclick = function () { pickCommand(command); };
+      box.appendChild(item);
+    });
+  }
+
+  function pickCommand(command) {
+    var takesArgs = command.usage.indexOf(" ") > 0;
+    inputEl.value = "/" + command.name + (takesArgs ? " " : "");
+    renderCommands();
+    autosize();
+    inputEl.focus();
+    if (!takesArgs) send();
+  }
+
   function clearChat() {
     messagesEl.innerHTML = "";
     toolCards = {};
+    quizCards = {};
     progressEl = null;
     lastEventId = 0;
     $("welcome").classList.remove("hidden");
@@ -342,7 +495,7 @@
 
   // ---------- режим и тема ----------
   function applyMode(value) {
-    mode = value === "novice" ? "novice" : "engineer";
+    mode = CHAT_MODES.indexOf(value) >= 0 ? value : "engineer";
     store("ste-ai-mode", mode);
     Array.prototype.forEach.call(document.querySelectorAll("#mode-switch button"), function (b) {
       b.classList.toggle("active", b.getAttribute("data-mode") === mode);
@@ -360,13 +513,16 @@
       button.onclick = function () { inputEl.value = example[0]; autosize(); inputEl.focus(); };
       box.appendChild(button);
     });
-    inputEl.placeholder = mode === "novice"
-      ? "Опишите деталь своими словами или спросите что угодно о печати…"
-      : "Задача, ТЗ или вопрос. Приложите модель — Enter для отправки";
+    inputEl.placeholder = {
+      learning: "Что хотите научиться печатать? Или «Проверь мои настройки»…",
+      novice: "Опишите деталь своими словами или спросите что угодно о печати…",
+      engineer: "Задача, ТЗ или вопрос. Приложите модель — Enter для отправки",
+      pro: "Задача или команда: /recipe, /infill 40, /slice… (/help — все команды)"
+    }[mode];
   }
 
   function applyTheme(value) {
-    theme = ["studio", "graphite", "blueprint"].indexOf(value) >= 0 ? value : "studio";
+    theme = value === "graphite" ? "graphite" : "studio";
     store("ste-ai-theme", theme);
     document.documentElement.setAttribute("data-theme", theme);
     Array.prototype.forEach.call(document.querySelectorAll(".theme-card"), function (card) {
@@ -468,7 +624,7 @@
   function isLastAssistant(events, event) {
     for (var i = events.length - 1; i >= 0; i--) {
       if (events[i].type === "user") return false;
-      if (events[i].type === "assistant") return events[i] === event;
+      if (events[i].type === "assistant" || events[i].type === "quiz_done") return events[i] === event;
     }
     return false;
   }
@@ -516,6 +672,7 @@
       if (!data.ok) throw new Error(data.error || "Не удалось отправить");
       inputEl.value = "";
       autosize();
+      renderCommands();
       pending = [];
       renderAttachments();
       setBusy(true, false);
@@ -639,8 +796,11 @@
     card.onclick = function () { applyTheme(card.getAttribute("data-theme-pick")); };
   });
 
-  inputEl.addEventListener("input", autosize);
+  inputEl.addEventListener("input", function () { autosize(); renderCommands(); });
   inputEl.addEventListener("keydown", function (event) {
+    var commands = matchingCommands();
+    if (event.key === "Tab" && commands.length) { event.preventDefault(); pickCommand(commands[0]); return; }
+    if (event.key === "Escape") { $("commands").classList.add("hidden"); return; }
     if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); send(); }
   });
 
@@ -662,6 +822,7 @@
   } else if (!token) {
     showBanner("Нет токена сессии: откройте чат из меню слайсера «Extensions → AI Assistant → Открыть чат».");
   }
+  loadCommands();
   refreshSessions().then(function () { poll(); });
   refreshState();
   setInterval(refreshState, 4000);

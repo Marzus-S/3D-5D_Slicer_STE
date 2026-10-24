@@ -44,8 +44,10 @@
         <span class="chip" id="chip-quality" title="Профиль качества">—</span>
       </div>
       <div class="segmented" id="mode-switch" role="group" aria-label="Режим общения">
+        <button data-mode="learning" title="Наставник: вы решаете сами, бот проверяет, объясняет и задаёт квизы">Обучение</button>
         <button data-mode="novice" title="Простые объяснения, бот задаёт уточняющие вопросы">Новичок</button>
         <button data-mode="engineer" title="Кратко и технически, без лишних вопросов">Инженер</button>
+        <button data-mode="pro" title="Максимальная скорость: рецепты, быстрые команды /…, ответ таблицей">Профи</button>
       </div>
     </header>
 
@@ -63,6 +65,7 @@
 
     <footer class="composer" id="composer">
       <div class="attachments" id="attachments"></div>
+      <div class="commands hidden" id="commands" role="listbox" aria-label="Быстрые команды"></div>
       <div class="input-row">
         <label class="attach" title="Прикрепить модель (STL, OBJ, 3MF) или фото (JPG, PNG)">
           <input type="file" id="file-input" multiple accept=".stl,.obj,.3mf,.jpg,.jpeg,.png">
@@ -74,7 +77,7 @@
         </button>
         <button class="danger hidden" id="btn-stop">Стоп</button>
       </div>
-      <div class="hint">Enter — отправить, Shift+Enter — новая строка. Файлы можно перетащить в окно.</div>
+      <div class="hint">Enter — отправить, Shift+Enter — новая строка, <b>/</b> — быстрые команды без нейросети. Файлы можно перетащить в окно.</div>
     </footer>
   </div>
 
@@ -87,18 +90,13 @@
       <div class="themes" id="themes">
         <button class="theme-card" data-theme-pick="studio">
           <span class="swatch swatch-studio"><i></i><b></b></span>
-          <span class="theme-name">Студия</span>
-          <span class="theme-desc">Светлая, фирменные цвета</span>
+          <span class="theme-name">Светлая</span>
+          <span class="theme-desc">Приглушённый светлый фон, мягкие тени</span>
         </button>
         <button class="theme-card" data-theme-pick="graphite">
           <span class="swatch swatch-graphite"><i></i><b></b></span>
-          <span class="theme-name">Графит</span>
-          <span class="theme-desc">Тёмная, для долгой работы</span>
-        </button>
-        <button class="theme-card" data-theme-pick="blueprint">
-          <span class="swatch swatch-blueprint"><i></i><b></b></span>
-          <span class="theme-name">Чертёж</span>
-          <span class="theme-desc">Инженерная, сетка и моноширинный шрифт</span>
+          <span class="theme-name">Тёмная</span>
+          <span class="theme-desc">Та же гамма без чёрного и белого — для долгой работы</span>
         </button>
       </div>
       <div class="section-label">Подключение к LLM</div>

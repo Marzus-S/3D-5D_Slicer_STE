@@ -47,6 +47,40 @@
 - Можно продолжать диалог: «сделай заполнение 60 % и перенарежь», «сравни профили по времени».
 - **Новый диалог** очищает историю, **Стоп** прерывает агента.
 
+### Режимы чата
+
+Переключатель в шапке — лестница от ученика до профессионала:
+
+| Режим | Для кого | Как ведёт себя ассистент |
+|---|---|---|
+| Обучение | хочет научиться сам | наставник: показывает факты и спрашивает «что бы выбрали вы?», разбирает ваши настройки (`review_my_settings`), после нарезки задаёт квиз |
+| Новичок | только начинает | простые слова, пара уточняющих вопросов, решает сам |
+| Инженер | технолог | кратко и технически, без лишних вопросов |
+| Профи | важна скорость | ответ таблицей, рецепты вместо подбора, подсказки быстрых команд |
+
+Каждый режим видит свой набор инструментов (`modes` в `register_tools`): квиз не нужен профи, рецепты — ученику.
+
+### Быстрые команды
+
+Строка, начинающаяся с `/`, выполняется сразу, без нейросети: разбор строки и прямой вызов инструментов.
+Список подсказывается при вводе `/` (Tab — дополнить), полный — `/help`.
+
+```
+/mode 5d   /mat pa6   /profile fine   /infill 40   /walls 5   /layers 6   /supports off
+/set wall_line_count=5 speed_print=40   /orient ось   /slice   /export 01_gear   /save 01_gear
+/saverecipe шестерня-PA6   /recipes   /recipe шестерня 01_gear   /check loaded   /quiz материал
+/analyze кручение   /analyze качение гибкая   /passport 01_gear   /matinfo pa6
+```
+
+Справочник материалов «как напечатано» (`agent/materials.py`): прочность вдоль и поперёк слоёв, рабочая
+температура и сушка для ABS, ASA, PLA, PETG, PA, TPU, PC и PP. У каждого числа метка источника: печатные образцы
+из руководства Hybrid 530, режимы сушки QIDI, ORNL или оценка. Чат отвечает по нему инструментом `material_info`,
+`/check` напоминает о сушке гигроскопичных материалов.
+
+Рецепт сохраняет режим, материал, профиль, ориентацию и изменённые настройки; `/recipe` применяет его как
+`apply_plan` (сброс, настройки, нарезка, G-code и 3MF). Рецепты, прогресс квизов и история чатов лежат
+в папке данных слайсера: `aiassistant_recipes.json`, `aiassistant_progress.json`, `aiassistant_chats/`.
+
 Результаты сохраняются по шаблону сдачи:
 
 ```
@@ -79,6 +113,10 @@ G-code и 3MF, версии слайсера, плагина и LLM. Стату�
    ├─ agent/advisor.py    — предпечатная проверка и 5D-советник (баллы 3D/5D, диаметр базы)
    ├─ agent/passport.py   — паспорт рецепта (passport.md и passport.json)
    ├─ agent/knowledge.py  — инструкция агента, паспорт принтера, лимиты материалов
+   ├─ agent/learning.py   — банк вопросов квиза, правила разбора настроек ученика, прогресс
+   ├─ agent/recipes.py    — хранилище рецептов
+   ├─ agent/materials.py  — справочник материалов «как напечатано» с источниками
+   ├─ agent/commands.py   — быстрые команды «/…» без LLM
    ├─ agent/llm.py        — клиент OpenAI-совместимого API (Chat Completions + tool calling)
    └─ agent/mainthread.py — безопасный вызов кода в главном потоке (callLater + ожидание)
    ▼
@@ -93,12 +131,14 @@ OpenAI-совместимый API LLM            API STE Slicer (настрой�
 | Группа | Инструменты |
 |---|---|
 | Состояние | `get_printer_state` |
-| Профили и материалы | `list_quality_profiles`, `set_quality_profile`, `list_materials`, `set_material`, `save_profile` |
+| Профили и материалы | `list_quality_profiles`, `set_quality_profile`, `list_materials`, `material_info`, `set_material`, `save_profile` |
 | Режим | `set_printing_mode` (`classic` / `cylindrical` / `cylindrical_full`) |
 | Настройки | `search_settings`, `get_settings`, `set_settings`, `reset_settings` |
 | Модели | `load_model`, `list_objects`, `analyze_model`, `orient_model`, `rotate_model`, `move_model`, `scale_model`, `arrange_all`, `delete_model` |
 | Слайсинг | `slice`, `get_slice_status`, `get_slice_result`, `export_gcode`, `validate_gcode`, `save_project`, `compare_variants` |
 | Конвейер и паспорт | `apply_plan`, `save_passport` |
+| Рецепты | `save_recipe`, `list_recipes`, `apply_recipe` |
+| Обучение | `review_my_settings`, `quiz` |
 
 Свои функции поверх минимального набора:
 
