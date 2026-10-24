@@ -2,6 +2,7 @@
 # (тот же JSON-RPC, что и внешний /mcp) и возвращает результаты, пока модель не даст итоговый ответ.
 
 import base64
+import importlib
 import json
 import os
 import re
@@ -11,12 +12,15 @@ import traceback
 
 from UM.Logger import Logger
 
-from . import errors, llm
-from .knowledge import MODE_PROMPTS, SYSTEM_PROMPT
+from . import errors, knowledge, llm
+from .knowledge import MODE_PROMPTS
 from .sessions import DEFAULT_TITLE, Session
 
 MAX_STEPS = 32
-MAX_TOOL_RESULT_CHARS = 9000
+MAX_TOOL_RESULT_CHARS = 6000
+REQUEST_BUDGET = 40000  # байт на запрос к LLM вместе с инструкцией и описанием инструментов
+READ_ONLY_TOOLS = {"get_printer_state", "analyze_model", "list_objects", "list_materials", "list_quality_profiles",
+                   "search_settings", "get_settings", "get_slice_status", "get_slice_result"}
 HISTORY_LIMIT = 70
 MAX_ATTACHMENT_BYTES = 120 * 1024 * 1024
 MODEL_EXTENSIONS = (".stl", ".obj", ".3mf")
@@ -200,7 +204,7 @@ class Agent:
     # ------------------------------------------------------------------ цикл диалога
 
     def _system_message(self, mode):
-        content = SYSTEM_PROMPT + "\n\n" + MODE_PROMPTS[mode]
+        content = knowledge.SYSTEM_PROMPT + "\n\n" + knowledge.MODE_PROMPTS[mode]
         try:
             state = self._tools.get_printer_state()
             compact = {
@@ -225,6 +229,10 @@ class Agent:
         return tail
 
     def _run(self, session, text, files, mode):
+        try:
+            importlib.reload(knowledge)  # правки инструкции подхватываются без перезапуска слайсера
+        except Exception as e:
+            Logger.log("w", "[AIAssistant] Cannot reload knowledge.py: %s", e)
         messages = session.messages
         self._events = session.events
         run = "r%d" % (sum(1 for m in messages if m.get("role") == "user") + 1)
@@ -293,6 +301,9 @@ class Agent:
                         warning = guard.check(call)
                         result_text = json.dumps({"error": warning}, ensure_ascii=False) if warning else self._execute(call)
                         guard.record(call, result_text)
+                        hint = guard.decision_hint()
+                        if hint and result_text.endswith("}"):
+                            result_text = result_text[:-1] + ', "hint": %s}' % json.dumps(hint, ensure_ascii=False)
                     messages.append({"role": "tool", "tool_call_id": call["id"], "content": result_text})
             else:
                 self._report_error("Достигнут лимит шагов (%d). Напишите «продолжай», чтобы агент закончил." % MAX_STEPS,
@@ -322,31 +333,29 @@ class Agent:
             session.events.listener = None
 
     def _chat(self, settings, model, mode, messages, tools_schema):
-        """Запрос к LLM с повтором: временные сбои — до 2 повторов, слишком длинный запрос — сжимаем историю."""
-        compact = False
+        """Запрос к LLM в пределах бюджета размера. Сервер организаторов рвёт соединение на больших запросах
+        (~50 КБ и больше), поэтому старые результаты инструментов сжимаются; при сбое бюджет уменьшается."""
+        tools_size = len(json.dumps(tools_schema, ensure_ascii=False).encode("utf-8"))
+        budget = REQUEST_BUDGET
         for attempt in range(1, 4):
-            history = self._history(messages)
-            if compact:
-                history = [_compact(m) for m in history]
+            system = self._system_message(mode)
+            history = _fit_history(self._history(messages), system, tools_size, budget)
             try:
                 return llm.chat(settings["base_url"], settings["api_key"], model,
-                                [self._system_message(mode)] + history, tools_schema,
+                                [system] + history, tools_schema,
                                 settings["temperature"], settings["verify_ssl"])
             except llm.LLMError as e:
-                Logger.log("w", "[AIAssistant] LLM error (attempt %d): %s", attempt, e)
-                self._journal.warning("llm_attempt_failed", {"attempt": attempt, "model": model, "message": str(e),
-                                                    "status": getattr(e, "status", None)}, *self._context)
+                Logger.log("w", "[AIAssistant] LLM error (attempt %d, budget %d): %s", attempt, budget, e)
+                self._journal.warning("llm_attempt_failed", {"attempt": attempt, "budget": budget, "model": model,
+                                                             "message": str(e), "status": getattr(e, "status", None)},
+                                      *self._context)
                 text = str(e).lower()
-                if attempt == 3:
+                too_big = any(w in text for w in ("context", "too long", "token", "length", "1024"))
+                if attempt == 3 or not (too_big or e.retryable):
                     raise
-                if not compact and any(w in text for w in ("context", "too long", "token", "length", "1024")):
-                    compact = True
-                    self._events.add("status", text="Запрос к нейросети слишком большой — сокращаю историю и повторяю")
-                elif e.retryable:
-                    self._events.add("status", text="Нейросеть не ответила — повторяю запрос (%d из 2)" % attempt)
-                    time.sleep(3 * attempt)
-                else:
-                    raise
+                budget = int(budget * 0.7)
+                self._events.add("status", text="Нейросеть не ответила — сокращаю запрос и повторяю (%d из 2)" % attempt)
+                time.sleep(2 * attempt)
 
     def _auto_model(self, settings):
         models = llm.list_models(settings["base_url"], settings["api_key"], settings["verify_ssl"])
@@ -390,6 +399,11 @@ class Agent:
                             weight=payload.get("total_weight_g"), mode=payload.get("printing_mode"))
         if ok and name in ("export_gcode", "save_project") and isinstance(payload, dict):
             self._events.add("file_saved", kind=name, path=payload.get("path"))
+        if ok and name == "apply_plan" and isinstance(payload, dict):
+            self._events.add("slice_result", print_time=payload.get("print_time"),
+                             weight=payload.get("total_weight_g"), mode=payload.get("printing_mode"))
+            self._events.add("file_saved", kind="export_gcode", path=payload.get("gcode_path"))
+            self._events.add("file_saved", kind="save_project", path=payload.get("project_path"))
 
         text = json.dumps(payload, ensure_ascii=False)
         if len(text) > MAX_TOOL_RESULT_CHARS:
@@ -423,6 +437,8 @@ class _LoopGuard:
     def __init__(self):
         self._last = None
         self._same = 0
+        self._seen = {}
+        self._reads = 0
         self._fail_tool = None
         self._fails = 0
         self._warnings = 0
@@ -430,6 +446,10 @@ class _LoopGuard:
 
     def check(self, call):
         signature = (call["function"]["name"], call["function"]["arguments"])
+        # Чтение состояния не меняется, если между вызовами ничего не делали: ловим и повторы через раз.
+        if self._seen.get(signature, 0) >= 2 and call["function"]["name"] in READ_ONLY_TOOLS:
+            return self._warn("Этот вызов уже выполнялся с теми же аргументами, результат есть выше в истории. "
+                              "Не повторяй его — переходи к следующему шагу порядка работы.")
         if signature == self._last and self._same >= 2:
             return self._warn("Этот вызов уже выполнялся несколько раз с теми же аргументами — результат не изменится. "
                               "Не повторяй его: переходи к следующему шагу или объясни пользователю, что мешает.")
@@ -442,6 +462,20 @@ class _LoopGuard:
         signature = (call["function"]["name"], call["function"]["arguments"])
         self._same = self._same + 1 if signature == self._last else 1
         self._last = signature
+        if call["function"]["name"] in READ_ONLY_TOOLS:
+            self._seen[signature] = self._seen.get(signature, 0) + 1
+            self._reads += 1
+        else:
+            self._seen = {}  # что-то изменили — повторное чтение снова имеет смысл
+            if call["function"]["name"] != "reset_settings":
+                self._reads = 0
+
+    def decision_hint(self):
+        """Модель долго только читает и ничего не применяет — подсказываем перейти к apply_plan."""
+        if self._reads >= 7:
+            return ("Данных уже достаточно. Хватит исследовать: прими решение и сразу вызови apply_plan "
+                    "(режим, материал, профиль, ориентация, ключевые настройки, name).")
+        return None
         failed = result_text.startswith('{"error"')
         if failed:
             name = call["function"]["name"]
@@ -455,6 +489,30 @@ class _LoopGuard:
         if self._warnings >= 3:
             self.tripped = True
         return text
+
+
+def _fit_history(history, system, tools_size, budget):
+    """Сжимает результаты инструментов (кроме двух последних сообщений), пока запрос не влезет в бюджет."""
+    def size(items):
+        return tools_size + len(json.dumps([system] + items, ensure_ascii=False).encode("utf-8"))
+
+    # Последний раунд (вызовы модели и их результаты) не сжимаем — модель должна видеть их целиком.
+    keep = len(history) - 1
+    while keep > 0 and not (history[keep].get("role") == "assistant" and history[keep].get("tool_calls")):
+        keep -= 1
+    keep = keep if keep > 0 else max(len(history) - 2, 0)
+    candidate = history
+    for limit in (None, 2000, 1000, 500, 250):
+        if limit is not None:
+            candidate = [_compact(m, limit) if i < keep else m for i, m in enumerate(history)]
+        if size(candidate) <= budget:
+            return candidate
+    # Совсем длинный диалог: отбрасываем старые ходы, начиная новый срез с сообщения пользователя.
+    while len(candidate) > 2 and size(candidate) > budget:
+        candidate = candidate[1:]
+        while candidate and candidate[0].get("role") != "user":
+            candidate = candidate[1:]
+    return candidate
 
 
 def _compact(message, limit=1500):
