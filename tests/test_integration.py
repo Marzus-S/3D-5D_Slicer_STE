@@ -583,6 +583,18 @@ check("command calls tool directly", len(REQUESTS) == before and any(
 call("/api/message", {"text": "/nope", "session": cmd_chat})
 evs = run_until_end(cmd_chat)
 check("unknown command explained", any(e["type"] == "assistant" and "/help" in e["text"] for e in evs[-3:]))
+call("/api/message", {"text": "/analyze кручение", "session": cmd_chat})
+evs = run_until_end(cmd_chat)
+check("analyze command", len(REQUESTS) == before and any(
+    e["type"] == "tool_call" and e["name"] == "analyze_model" and e["args"] == {"load": "torsion"} for e in evs)
+)
+from AIAssistant.agent import commands as C
+fake = {"preflight": {"summary": "ошибки — 0"}, "five_axis": {
+    "verdict": "5d", "score": 4, "base_diameter_mm": 30, "blockers": [], "decide": "Решает технолог",
+    "factors": [{"points": 1, "why": "мелкое"}, {"points": 3, "why": "кручение вдоль слоёв"}]}}
+text = C.execute("/analyze кручение гибкая", lambda tool, args: (True, fake))
+check("analyze formatted", "печатать в 5D" in text and "балл 4" in text and "⌀30" in text
+      and text.index("+3") < text.index("+1"), text)
 status, listed_cmds = call("/api/commands")
 check("commands catalog", any(c["name"] == "recipe" for c in listed_cmds["commands"]) and "level" in listed_cmds["progress"])
 

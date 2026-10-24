@@ -69,6 +69,7 @@
 /mode 5d   /mat pa6   /profile fine   /infill 40   /walls 5   /layers 6   /supports off
 /set wall_line_count=5 speed_print=40   /orient ось   /slice   /export 01_gear   /save 01_gear
 /saverecipe шестерня-PA6   /recipes   /recipe шестерня 01_gear   /check loaded   /quiz материал
+/analyze кручение   /analyze качение гибкая   /passport 01_gear
 ```
 
 Рецепт сохраняет режим, материал, профиль, ориентацию и изменённые настройки; `/recipe` применяет его как
