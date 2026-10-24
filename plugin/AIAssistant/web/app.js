@@ -35,7 +35,8 @@
   var commandList = [];    // быстрые команды из /api/commands
   var progressEl = null;
   var mode = stored("ste-ai-mode", "engineer");
-  var theme = stored("ste-ai-theme", "studio");
+  var theme = stored("ste-ai-theme", "auto");
+  var darkScheme = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
 
   var MODE_LABELS = { classic: "3D", cylindrical: "5D Spiral", cylindrical_full: "5D" };
   var CHAT_MODES = ["learning", "novice", "engineer", "pro"];
@@ -520,9 +521,10 @@
   }
 
   function applyTheme(value) {
-    theme = ["studio", "graphite", "blueprint"].indexOf(value) >= 0 ? value : "studio";
+    theme = ["auto", "studio", "graphite", "blueprint"].indexOf(value) >= 0 ? value : "auto";
     store("ste-ai-theme", theme);
-    document.documentElement.setAttribute("data-theme", theme);
+    var shown = theme === "auto" ? (darkScheme && darkScheme.matches ? "graphite" : "studio") : theme;
+    document.documentElement.setAttribute("data-theme", shown);
     Array.prototype.forEach.call(document.querySelectorAll(".theme-card"), function (card) {
       card.classList.toggle("active", card.getAttribute("data-theme-pick") === theme);
     });
@@ -814,6 +816,9 @@
   });
 
   applyTheme(theme);
+  if (darkScheme && darkScheme.addListener) {
+    darkScheme.addListener(function () { if (theme === "auto") applyTheme("auto"); });
+  }
   applyMode(mode);
   if (location.protocol === "file:") {
     showBanner("Страница открыта как файл, а не через плагин. Откройте чат из меню слайсера: Extensions → AI Assistant → Открыть чат.");
