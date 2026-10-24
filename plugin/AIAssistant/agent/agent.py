@@ -237,8 +237,15 @@ class Agent:
             model = settings.get("model") or self._auto_model(settings)
             tools_schema = self._registry.llm_tools()
             self._tools.watcher.progress_callback = self._on_progress
+            guard = _LoopGuard()
 
             for _ in range(MAX_STEPS):
+                if guard.tripped:
+                    self._events.add("error", text="Агент начал повторять одни и те же действия и остановлен. "
+                                                   "Проверьте, что модель прикреплена, или уточните задачу.")
+                    messages.append({"role": "assistant", "content": "(остановлено: повтор одних и тех же действий)"})
+                    finished_cleanly = True
+                    break
                 if self._cancel:
                     self._events.add("status", text="Остановлено пользователем")
                     messages.append({"role": "assistant", "content": "(остановлено пользователем)"})
@@ -275,7 +282,9 @@ class Agent:
                     if self._cancel:
                         result_text = json.dumps({"error": "отменено пользователем"}, ensure_ascii=False)
                     else:
-                        result_text = self._execute(call)
+                        warning = guard.check(call)
+                        result_text = json.dumps({"error": warning}, ensure_ascii=False) if warning else self._execute(call)
+                        guard.record(call, result_text)
                     messages.append({"role": "tool", "tool_call_id": call["id"], "content": result_text})
             else:
                 self._events.add("error", text="Достигнут лимит шагов (%d). Напишите «продолжай», чтобы агент закончил." % MAX_STEPS)
@@ -378,6 +387,46 @@ class Agent:
         if amount >= 1.0 or abs(amount - last_amount) >= 0.05 or now - last_time > 2.0:
             self._last_progress = (amount, now)
             self._events.add("progress", value=round(amount, 3))
+
+
+class _LoopGuard:
+    """Не даёт модели крутиться на месте: повтор того же вызова и серия неудач одного инструмента."""
+
+    def __init__(self):
+        self._last = None
+        self._same = 0
+        self._fail_tool = None
+        self._fails = 0
+        self._warnings = 0
+        self.tripped = False
+
+    def check(self, call):
+        signature = (call["function"]["name"], call["function"]["arguments"])
+        if signature == self._last and self._same >= 2:
+            return self._warn("Этот вызов уже выполнялся несколько раз с теми же аргументами — результат не изменится. "
+                              "Не повторяй его: переходи к следующему шагу или объясни пользователю, что мешает.")
+        if call["function"]["name"] == self._fail_tool and self._fails >= 3:
+            return self._warn("Инструмент %s уже несколько раз подряд вернул ошибку. Не пробуй варианты наугад: "
+                              "сообщи пользователю, в чём проблема, и спроси, как быть." % self._fail_tool)
+        return None
+
+    def record(self, call, result_text):
+        signature = (call["function"]["name"], call["function"]["arguments"])
+        self._same = self._same + 1 if signature == self._last else 1
+        self._last = signature
+        failed = result_text.startswith('{"error"')
+        if failed:
+            name = call["function"]["name"]
+            self._fails = self._fails + 1 if name == self._fail_tool else 1
+            self._fail_tool = name
+        else:
+            self._fail_tool, self._fails = None, 0
+
+    def _warn(self, text):
+        self._warnings += 1
+        if self._warnings >= 3:
+            self.tripped = True
+        return text
 
 
 def _compact(message, limit=1500):

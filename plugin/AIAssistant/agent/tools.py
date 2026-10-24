@@ -452,17 +452,22 @@ class SlicerTools:
             name = node.getMetaDataEntry("name", root_id) or root_id
             description = " ".join((node.getMetaDataEntry("description", "") or "").split())
             properties = node.getMetaDataEntry("properties", {}) or {}
+            score = 0
             if query:
+                # Любое слово запроса (по основе из 4 букв: «шестерня» найдёт «шестерён»), больше совпадений — выше.
                 haystack = " ".join([root_id, name, brand, description]).lower()
-                if not all(word in haystack for word in str(query).lower().split()):
+                score = sum(1 for word in str(query).lower().split() if word[:4] in haystack)
+                if not score:
                     continue
-            item = {"id": root_id, "name": name, "brand": brand, "density": properties.get("density")}
+            item = {"id": root_id, "name": name, "brand": brand, "density": properties.get("density"), "_score": score}
             if root_id == active:
                 item["active"] = True
             if description:
                 item["description"] = description[:260]
             items.append(item)
-        items.sort(key=lambda i: (i["brand"] != "Stereotech", i["name"]))
+        items.sort(key=lambda i: (-i["_score"], i["brand"] != "Stereotech", i["name"]))
+        for item in items:
+            del item["_score"]
         return {"extruder": int(extruder or 0), "active": active, "count": len(items), "materials": items}
 
     def set_material(self, material_id, extruder=0):
@@ -671,9 +676,7 @@ class SlicerTools:
     # ------------------------------------------------------------------ модели и сцена
 
     def load_model(self, path, clear_scene=True):
-        path = os.path.abspath(os.path.expanduser(str(path)))
-        if not os.path.isfile(path):
-            raise ToolError("Файл не найден: %s" % path)
+        path = _resolve_model_path(path)
         extension = os.path.splitext(path)[1].lower()
         if extension not in (".stl", ".obj", ".3mf"):
             raise ToolError("Поддерживаются STL, OBJ и 3MF")
@@ -1043,6 +1046,41 @@ class SlicerTools:
         for stack, values in zip(stacks, snapshot["user"]):
             for key, value in values.items():
                 stack.userChanges.setProperty(key, "value", value)
+
+
+def _resolve_model_path(path):
+    """Абсолютный путь — как есть. Относительный или неточный — ищем файл в «Документах», на рабочем столе
+    и в «Загрузках»: сначала по совпадению хвоста пути, потом по имени файла."""
+    raw = os.path.expanduser(str(path).strip().strip('"').strip("'"))
+    if os.path.isabs(raw) and os.path.isfile(raw):
+        return raw
+    wanted_tail = os.path.normcase(os.path.normpath(raw)).lstrip("." + os.sep)
+    wanted_name = os.path.normcase(os.path.basename(raw))
+    by_name = None
+    seen = 0
+    home = os.path.expanduser("~")
+    for root in [os.path.join(home, "Documents"), os.path.join(home, "Desktop"), os.path.join(home, "Downloads")]:
+        if not os.path.isdir(root):
+            continue
+        base_depth = root.rstrip(os.sep).count(os.sep)
+        for folder, dirs, files in os.walk(root):
+            if folder.count(os.sep) - base_depth >= 6:
+                dirs[:] = []
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("node_modules", "__pycache__")]
+            for name in files:
+                seen += 1
+                if os.path.normcase(name) != wanted_name:
+                    continue
+                full = os.path.join(folder, name)
+                if os.path.normcase(full).endswith(wanted_tail):
+                    return full
+                by_name = by_name or full
+            if seen > 200000:
+                break
+    if by_name:
+        return by_name
+    raise ToolError("Файл не найден: %s. Не подбирай пути наугад — попроси пользователя прикрепить модель "
+                    "скрепкой в чате (вложения загружаются автоматически) или прислать полный путь." % raw)
 
 
 def _check_gcode(path):
