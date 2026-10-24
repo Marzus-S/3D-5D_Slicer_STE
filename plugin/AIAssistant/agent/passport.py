@@ -63,6 +63,8 @@ def build(state, model_path=None, analysis=None, plan=None, rationale=None, gcod
 
     settings = []
     for item in state.get("settings") or []:
+        if item["key"] == "printing_mode":
+            continue  # режим уже в «Решениях»
         entry = OrderedDict(item)
         if rationale.get(item["key"]):
             entry["why"] = rationale[item["key"]]
