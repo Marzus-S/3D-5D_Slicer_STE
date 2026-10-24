@@ -380,6 +380,13 @@ class Agent:
         result = self._learning.check(question["qid"], choice)
         session.events.add("quiz_answer", quiz_event=quiz_event, choice=choice, correct=result["correct"],
                            answer=result["answer"], why=result["why"], score=result["score"])
+        # Последний ответ серии — итог и кнопки «что дальше», чтобы не приходилось писать «продолжай».
+        batch = [e for e in session.events.all() if e["type"] == "quiz" and e.get("batch") == question.get("batch")]
+        answers = {e.get("quiz_event"): e for e in session.events.all() if e["type"] == "quiz_answer"}
+        if question.get("batch") and all(e["id"] in answers for e in batch):
+            session.events.add("quiz_done", right=sum(1 for e in batch if answers[e["id"]]["correct"]),
+                               total=len(batch), topic=question.get("topic_key"), topic_label=question.get("topic"),
+                               score=result["score"])
         try:
             self._store.save(session)
         except Exception as e:
@@ -465,6 +472,7 @@ class Agent:
         if ok and name == "quiz" and isinstance(payload, dict):
             for question in payload.get("questions") or []:
                 self._events.add("quiz", qid=question["id"], topic=question["topic_label"],
+                                 topic_key=question["topic"], batch=call_id,
                                  question=question["question"], options=question["options"])
         return ok, payload
 
