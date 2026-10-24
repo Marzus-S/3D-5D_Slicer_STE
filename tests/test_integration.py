@@ -177,6 +177,14 @@ class FakeLLM(BaseHTTPRequestHandler):
         payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         REQUESTS.append(payload)
         last = payload["messages"][-1]
+        first_user = next(m for m in payload["messages"] if m["role"] == "user")
+        if "ЗАЦИКЛИТЬ" in str(first_user["content"]):
+            # Модель после готового плана не пишет итог, а зовёт инструменты дальше
+            step = sum(1 for m in payload["messages"] if m["role"] == "assistant" and m.get("tool_calls"))
+            name, args = ("apply_plan", {"printing_mode": "classic", "material_id": "x"}) if step == 0 else ("get_printer_state", {})
+            self._json({"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "z%d" % step, "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}]}}]})
+            return
         if "новичок" in payload["messages"][0]["content"] and last["role"] == "user":
             message = {"role": "assistant", "content": "Где будет работать деталь?\nВарианты: дома | на улице | Реши сам"}
         elif last["role"] == "user" and payload.get("stream"):
@@ -581,6 +589,44 @@ check("loop guard counts repeated failures", bool(g2.check(broken)))
 g2.tripped = True
 g2.relax()
 check("loop guard relax gives second chance", not g2.tripped and g2.check(same) is None)
+
+# ---------------- после готового плана — только итог ----------------
+fake_plan = {"applied": {"mode": "classic", "material": "Fiberpart PC G20", "quality": "Fine",
+                         "settings": {"wall_line_count": 6}}, "printing_mode": "classic", "print_time": "1 ч 49 мин",
+             "total_weight_g": 4.3, "gcode_path": "C:/r/result.gcode", "gcode_valid": True, "gcode_issues": [],
+             "gcode_warnings": [], "project_path": "C:/r/project.3mf", "passport_path": "C:/r/passport.md",
+             "passport_notes": ["отверстие ⌀4 мм: развёртка"]}
+check("applied plan recognised", A._applied_plan(json.dumps(fake_plan)) is not None
+      and A._applied_plan(json.dumps(dict(fake_plan, gcode_valid=False))) is None
+      and A._applied_plan(json.dumps(dict(fake_plan, applied={"settings_errors": [{"key": "x"}]}))) is None)
+summary = A._plan_summary(fake_plan, {"mode": "советник: 3D", "wall_line_count": "корень зуба"})
+check("plan summary from template", "**Режим:** 3D (classic) — советник: 3D" in summary and "passport.md" in summary
+      and "`wall_line_count = 6` — корень зуба" in summary and "развёртка" in summary, summary)
+original_execute = A.Agent._execute
+executed = []
+
+
+def fake_execute(self, call):
+    executed.append(call["function"]["name"])
+    if call["function"]["name"] == "apply_plan":
+        return json.dumps(fake_plan, ensure_ascii=False)
+    return original_execute(self, call)
+
+
+A.Agent._execute = fake_execute
+status, fresh = call("/api/sessions/new", {})
+call("/api/message", {"text": "ЗАЦИКЛИТЬ шестерню", "session": fresh["session"]})
+deadline, evs = time.time() + 20, []
+while time.time() < deadline:
+    status, data = call("/api/events?after=0&session=" + fresh["session"])
+    evs = data["events"]
+    if any(e["type"] == "run_end" for e in evs):
+        break
+    time.sleep(0.2)
+A.Agent._execute = original_execute
+finals = [e["text"] for e in evs if e["type"] == "assistant"]
+check("after plan: auto summary instead of loop", finals and "Итог собран автоматически" in finals[-1]
+      and not any(e["type"] == "error" for e in evs) and executed == ["apply_plan"], str(executed))
 check("passport: mode differs from advice noted", any("5D-советника" in n for n in saved["notes"]), str(saved["notes"]))
 check("passport: markdown sections", all(s in markdown for s in ("## Решения", "## 5D-советник", "## Изменённые настройки",
                                                                  "## Заполняет технолог", "mock-gemma", "Колесо конвейера")))

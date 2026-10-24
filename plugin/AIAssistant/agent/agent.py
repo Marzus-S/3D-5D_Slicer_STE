@@ -28,6 +28,10 @@ FORCE_DECISION = ("Данных достаточно, дальше доступ�
                   "вызови apply_plan (режим по five_axis.verdict, материал из list_materials, профиль, ориентация, "
                   "ключевые настройки, name, rationale) и затем дай итог. Если без ответа пользователя решить нельзя — "
                   "задай один вопрос в формате «Варианты: …».")
+FINISH_HINT = ("План применён: G-code, 3MF и паспорт сохранены и проверены. Теперь только итог по шаблону — "
+               "инструменты больше не вызывай, ничего не перепроверяй.")
+FINISH_ONLY = "План уже применён, файлы сохранены. Инструменты больше не вызывай — напиши итог по шаблону."
+MODE_LABELS = {"classic": "3D", "cylindrical": "5D Spiral", "cylindrical_full": "5D"}
 IMAGE_EXTENSIONS = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
 
 
@@ -254,8 +258,17 @@ class Agent:
             self._tools.cancel_check = lambda: self._cancel
             guard = _LoopGuard()
             forced = False
+            plan = None      # результат успешного apply_plan: дальше нужен только итог
+            refusals = 0     # сколько раз после готового плана модель всё равно звала инструменты
 
             for _ in range(MAX_STEPS):
+                if plan is not None and (guard.tripped or refusals >= 2):
+                    # План применён, а модель так и не написала итог — собираем его сами из результата.
+                    text = _plan_summary(plan, (self._tools.last_plan or {}).get("rationale") or {})
+                    messages.append({"role": "assistant", "content": text})
+                    self._events.add("assistant", text=text)
+                    finished_cleanly = True
+                    break
                 if guard.tripped and not forced and messages and messages[-1].get("role") == "tool" \
                         and any(t["function"]["name"] == "apply_plan" for t in tools_schema):
                     # Модель кружит в сборе данных: один раз оставляем ей только apply_plan — решить или спросить.
@@ -303,14 +316,27 @@ class Agent:
                 messages.append({"role": "assistant", "content": content or "", "tool_calls": normalized})
                 if content.strip():
                     self._events.add("assistant_note", text=content)
+                if plan is not None:
+                    refusals += 1
+                allowed = set(t["function"]["name"] for t in tools_schema)
                 for call in normalized:
+                    name = call["function"]["name"]
                     if self._cancel:
                         result_text = json.dumps({"error": "отменено пользователем"}, ensure_ascii=False)
+                    elif plan is not None:
+                        result_text = json.dumps({"error": FINISH_ONLY}, ensure_ascii=False)
+                    elif name not in allowed:
+                        result_text = json.dumps({"error": "Инструмент %s сейчас недоступен, доступны: %s"
+                                                           % (name, ", ".join(sorted(allowed)))}, ensure_ascii=False)
+                        guard.record(call, result_text)
                     else:
                         warning = guard.check(call)
                         result_text = json.dumps({"error": warning}, ensure_ascii=False) if warning else self._execute(call)
                         guard.record(call, result_text)
                         hint = guard.decision_hint()
+                        if name == "apply_plan" and not warning:
+                            plan = _applied_plan(result_text)
+                            hint = FINISH_HINT if plan is not None else hint
                         if hint and result_text.endswith("}"):
                             result_text = result_text[:-1] + ', "hint": %s}' % json.dumps(hint, ensure_ascii=False)
                     messages.append({"role": "tool", "tool_call_id": call["id"], "content": result_text})
@@ -569,6 +595,51 @@ def _text_content(content):
 
 # qwen изредка вставляет в русский текст китайские слова («核心区 под нагруженный профиль»).
 _FOREIGN_SCRIPT = re.compile(r"[　-〿぀-ヿ㐀-䶿一-鿿가-힯＀-￯]+")
+
+
+def _applied_plan(result_text):
+    """Результат apply_plan, после которого остаётся только итог: G-code сохранён и прошёл проверку,
+    все настройки приняты. Иначе None — модели может понадобиться что-то поправить."""
+    try:
+        payload = json.loads(result_text)
+    except ValueError:
+        return None
+    if not isinstance(payload, dict) or not payload.get("gcode_path") or not payload.get("gcode_valid"):
+        return None
+    if (payload.get("applied") or {}).get("settings_errors"):
+        return None
+    return payload
+
+
+def _plan_summary(plan, rationale):
+    """Итог по шаблону из результата apply_plan — если модель после готового плана так и не написала его сама."""
+    applied = plan.get("applied") or {}
+
+    def why(key):
+        text = rationale.get(key)
+        return " — %s" % text if text else ""
+
+    mode = plan.get("printing_mode") or applied.get("mode")
+    lines = ["**Режим:** %s (%s)%s" % (MODE_LABELS.get(mode, mode), mode, why("mode")),
+             "**Материал:** %s%s" % (applied.get("material", "—"), why("material")),
+             "**Профиль:** %s%s" % (applied.get("quality", "по умолчанию"), why("quality"))]
+    settings = applied.get("settings") or {}
+    if settings:
+        lines.append("**Ключевые настройки:**")
+        lines += ["- `%s = %s`%s" % (key, settings[key], why(key)) for key in sorted(settings)]
+    if applied.get("orientation"):
+        lines.append("**Ориентация:** %s%s" % (applied["orientation"].get("goal"), why("orientation")))
+    lines.append("**Результат:** %s, %s г. G-code: `%s` (проверка пройдена); проект: `%s`; паспорт: `%s`." % (
+        plan.get("print_time") or "—", plan.get("total_weight_g"), plan.get("gcode_path"), plan.get("project_path"),
+        plan.get("passport_path") or "не сохранён"))
+    notes = plan.get("passport_notes")
+    notes = notes if isinstance(notes, list) else [notes] if notes else []
+    notes += ["G-code: %s" % w for w in plan.get("gcode_warnings") or []]
+    if notes:
+        lines.append("**Рекомендации:**")
+        lines += ["- %s" % note for note in notes]
+    lines.append("_Итог собран автоматически по результату apply_plan._")
+    return "\n".join(lines)
 
 
 def _first_user_text(messages):
