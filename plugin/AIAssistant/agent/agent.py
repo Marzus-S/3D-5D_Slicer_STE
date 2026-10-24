@@ -12,7 +12,8 @@ import traceback
 from UM.Logger import Logger
 
 from . import llm
-from .knowledge import SYSTEM_PROMPT
+from .knowledge import MODE_PROMPTS, SYSTEM_PROMPT
+from .sessions import DEFAULT_TITLE, Session
 
 MAX_STEPS = 32
 MAX_TOOL_RESULT_CHARS = 9000
@@ -22,43 +23,23 @@ MODEL_EXTENSIONS = (".stl", ".obj", ".3mf")
 IMAGE_EXTENSIONS = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
 
 
-class EventLog:
-    """Лента событий для веб-чата: пользователь, ответы, вызовы инструментов, прогресс."""
-
-    def __init__(self, limit=3000):
-        self._lock = threading.Lock()
-        self._events = []
-        self._next_id = 1
-        self._limit = limit
-
-    def add(self, kind, **data):
-        with self._lock:
-            event = {"id": self._next_id, "type": kind, "time": round(time.time(), 3)}
-            event.update(data)
-            self._next_id += 1
-            self._events.append(event)
-            if len(self._events) > self._limit:
-                self._events = self._events[-self._limit:]
-            return event
-
-    def since(self, after):
-        with self._lock:
-            return [e for e in self._events if e["id"] > after]
-
-
 class AgentBusy(Exception):
     pass
 
 
 class Agent:
-    def __init__(self, registry, mcp_handler, tools, settings_provider, upload_dir):
+    def __init__(self, registry, mcp_handler, tools, settings_provider, upload_dir, store):
         self._registry = registry
         self._mcp = mcp_handler
         self._tools = tools
         self._settings_provider = settings_provider
         self._upload_dir = upload_dir
-        self.events = EventLog()
-        self._messages = []
+        self._store = store
+        self._sessions = {s.id: s for s in store.load_all()}
+        recent = sorted(self._sessions.values(), key=lambda s: s.updated, reverse=True)
+        self._current_id = recent[0].id if recent else None
+        self._running_id = None
+        self._events = None  # лента событий чата, в котором сейчас идёт работа
         self._lock = threading.Lock()
         self._busy = False
         self._cancel = False
@@ -69,28 +50,88 @@ class Agent:
     def busy(self):
         return self._busy
 
+    @property
+    def running_id(self):
+        return self._running_id
+
+    @property
+    def current_id(self):
+        return self._current().id
+
+    # ------------------------------------------------------------------ история чатов
+
+    def _current(self):
+        session = self._sessions.get(self._current_id)
+        if session is None:
+            session = Session()
+            self._sessions[session.id] = session
+            self._current_id = session.id
+        return session
+
+    def sessions(self):
+        current = self._current()
+        items = sorted(self._sessions.values(), key=lambda s: s.updated, reverse=True)
+        return {
+            "sessions": [s.summary() for s in items if not s.is_empty() or s.id == current.id],
+            "current": current.id,
+            "busy": self._busy,
+            "running": self._running_id,
+        }
+
+    def new_session(self):
+        current = self._current()
+        if current.is_empty():
+            return current.id
+        session = Session()
+        self._sessions[session.id] = session
+        self._current_id = session.id
+        return session.id
+
+    def select(self, session_id):
+        if session_id not in self._sessions:
+            raise ValueError("Чат не найден")
+        self._current_id = session_id
+        return session_id
+
+    def delete(self, session_id):
+        if self._busy and self._running_id == session_id:
+            raise AgentBusy("В этом чате агент ещё работает — сначала остановите его")
+        self._sessions.pop(session_id, None)
+        self._store.delete(session_id)
+        if self._current_id == session_id:
+            recent = sorted(self._sessions.values(), key=lambda s: s.updated, reverse=True)
+            self._current_id = recent[0].id if recent else None
+        return self._current().id
+
+    def events_since(self, session_id, after):
+        session = self._sessions.get(session_id) if session_id else self._current()
+        return session.events.since(after) if session else []
+
     def reset(self):
-        if self._busy:
-            raise AgentBusy("Агент ещё работает — сначала остановите его")
-        self._messages = []
-        self.events.add("reset")
+        """Старое «Новый диалог» — теперь просто открывает новый чат, старые остаются в истории."""
+        return self.new_session()
 
     def stop(self):
         if self._busy:
             self._cancel = True
 
-    def submit(self, text, attachments):
+    def submit(self, text, attachments, session_id=None, mode="engineer"):
         with self._lock:
             if self._busy:
                 raise AgentBusy("Агент уже работает над предыдущим запросом")
             self._busy = True
             self._cancel = False
         try:
+            session = self._sessions.get(session_id) or self._current()
+            self._current_id = session.id
             files = self._save_attachments(attachments or [])
         except Exception:
             self._busy = False
             raise
-        threading.Thread(target=self._run, args=(text or "", files), name="AIAssistantAgent", daemon=True).start()
+        self._running_id = session.id
+        mode = mode if mode in MODE_PROMPTS else "engineer"
+        threading.Thread(target=self._run, args=(session, text or "", files, mode),
+                         name="AIAssistantAgent", daemon=True).start()
 
     # ------------------------------------------------------------------ вложения
 
@@ -155,8 +196,8 @@ class Agent:
 
     # ------------------------------------------------------------------ цикл диалога
 
-    def _system_message(self):
-        content = SYSTEM_PROMPT
+    def _system_message(self, mode):
+        content = SYSTEM_PROMPT + "\n\n" + MODE_PROMPTS[mode]
         try:
             state = self._tools.get_printer_state()
             compact = {
@@ -171,8 +212,8 @@ class Agent:
             Logger.log("w", "[AIAssistant] Cannot read printer state: %s", e)
         return {"role": "system", "content": content}
 
-    def _history(self):
-        messages = self._messages
+    @staticmethod
+    def _history(messages):
         if len(messages) <= HISTORY_LIMIT:
             return messages
         tail = messages[-HISTORY_LIMIT:]
@@ -180,11 +221,18 @@ class Agent:
             tail = tail[1:]
         return tail
 
-    def _run(self, text, files):
+    def _run(self, session, text, files, mode):
+        messages = session.messages
+        self._events = session.events
         finished_cleanly = False
         try:
-            self.events.add("user", text=text, attachments=[f["name"] for f in files])
-            self._messages.append(self._user_message(text, files))
+            if session.title == DEFAULT_TITLE:
+                title = " ".join(text.split())[:60]
+                if not title and files:
+                    title = "Модель " + files[0]["name"]
+                session.title = title or DEFAULT_TITLE
+            self._events.add("user", text=text, attachments=[f["name"] for f in files], mode=mode)
+            messages.append(self._user_message(text, files))
             settings = self._settings_provider()
             model = settings.get("model") or self._auto_model(settings)
             tools_schema = self._registry.llm_tools()
@@ -192,21 +240,21 @@ class Agent:
 
             for _ in range(MAX_STEPS):
                 if self._cancel:
-                    self.events.add("status", text="Остановлено пользователем")
-                    self._messages.append({"role": "assistant", "content": "(остановлено пользователем)"})
+                    self._events.add("status", text="Остановлено пользователем")
+                    messages.append({"role": "assistant", "content": "(остановлено пользователем)"})
                     finished_cleanly = True
                     break
-                self.events.add("thinking")
+                self._events.add("thinking")
                 message = llm.chat(settings["base_url"], settings["api_key"], model,
-                                   [self._system_message()] + self._history(), tools_schema,
+                                   [self._system_message(mode)] + self._history(messages), tools_schema,
                                    settings["temperature"], settings["verify_ssl"])
                 content = _text_content(message.get("content"))
                 calls = message.get("tool_calls") or []
                 if not calls:
                     calls, content = _inline_tool_calls(content, self._registry)
                 if not calls:
-                    self._messages.append({"role": "assistant", "content": content})
-                    self.events.add("assistant", text=content or "(пустой ответ модели)")
+                    messages.append({"role": "assistant", "content": content})
+                    self._events.add("assistant", text=content or "(пустой ответ модели)")
                     finished_cleanly = True
                     break
 
@@ -222,31 +270,37 @@ class Agent:
                         "type": "function",
                         "function": {"name": function.get("name") or "", "arguments": arguments},
                     })
-                self._messages.append({"role": "assistant", "content": content or "", "tool_calls": normalized})
+                messages.append({"role": "assistant", "content": content or "", "tool_calls": normalized})
                 if content.strip():
-                    self.events.add("assistant_note", text=content)
+                    self._events.add("assistant_note", text=content)
                 for call in normalized:
                     if self._cancel:
                         result_text = json.dumps({"error": "отменено пользователем"}, ensure_ascii=False)
                     else:
                         result_text = self._execute(call)
-                    self._messages.append({"role": "tool", "tool_call_id": call["id"], "content": result_text})
+                    messages.append({"role": "tool", "tool_call_id": call["id"], "content": result_text})
             else:
-                self.events.add("error", text="Достигнут лимит шагов (%d). Напишите «продолжай», чтобы агент закончил." % MAX_STEPS)
-                self._messages.append({"role": "assistant", "content": "(достигнут лимит шагов)"})
+                self._events.add("error", text="Достигнут лимит шагов (%d). Напишите «продолжай», чтобы агент закончил." % MAX_STEPS)
+                messages.append({"role": "assistant", "content": "(достигнут лимит шагов)"})
                 finished_cleanly = True
         except llm.LLMError as e:
-            self.events.add("error", text=str(e))
+            self._events.add("error", text=str(e))
         except Exception as e:
             Logger.log("e", "[AIAssistant] Agent failed: %s\n%s", e, traceback.format_exc())
-            self.events.add("error", text="%s: %s" % (type(e).__name__, e))
+            self._events.add("error", text="%s: %s" % (type(e).__name__, e))
         finally:
-            if not finished_cleanly and self._messages and self._messages[-1].get("role") != "assistant":
+            if not finished_cleanly and messages and messages[-1].get("role") != "assistant":
                 # Роли должны чередоваться — иначе следующий запрос к модели может упасть.
-                self._messages.append({"role": "assistant", "content": "(запрос не завершён из-за ошибки)"})
+                messages.append({"role": "assistant", "content": "(запрос не завершён из-за ошибки)"})
             self._tools.watcher.progress_callback = None
+            session.updated = time.time()
+            try:
+                self._store.save(session)
+            except Exception as e:
+                Logger.log("w", "[AIAssistant] Cannot save chat: %s", e)
             self._busy = False
-            self.events.add("run_end")
+            self._running_id = None
+            self._events.add("run_end")
 
     def _auto_model(self, settings):
         models = llm.list_models(settings["base_url"], settings["api_key"], settings["verify_ssl"])
@@ -264,12 +318,12 @@ class Agent:
                 raise ValueError("ожидался объект")
         except ValueError as e:
             payload = {"error": "Аргументы инструмента не являются JSON-объектом: %s" % e}
-            self.events.add("tool_call", call_id=call["id"], name=name, title=title, args={"raw": raw[:500]})
-            self.events.add("tool_result", call_id=call["id"], name=name, title=title, ok=False,
+            self._events.add("tool_call", call_id=call["id"], name=name, title=title, args={"raw": raw[:500]})
+            self._events.add("tool_result", call_id=call["id"], name=name, title=title, ok=False,
                             result=_preview(payload), seconds=0)
             return json.dumps(payload, ensure_ascii=False)
 
-        self.events.add("tool_call", call_id=call["id"], name=name, title=title, args=args)
+        self._events.add("tool_call", call_id=call["id"], name=name, title=title, args=args)
         started = time.time()
         self._request_id += 1
         response = self._mcp.call_tool(name, args, request_id=self._request_id)
@@ -281,13 +335,13 @@ class Agent:
             payload = result.get("structuredContent")
             if payload is None:
                 payload = {"text": result["content"][0]["text"]}
-        self.events.add("tool_result", call_id=call["id"], name=name, title=title, ok=ok,
+        self._events.add("tool_result", call_id=call["id"], name=name, title=title, ok=ok,
                         result=_preview(payload), seconds=round(time.time() - started, 1))
         if ok and name in ("slice", "get_slice_result") and isinstance(payload, dict) and payload.get("print_time"):
-            self.events.add("slice_result", print_time=payload.get("print_time"),
+            self._events.add("slice_result", print_time=payload.get("print_time"),
                             weight=payload.get("total_weight_g"), mode=payload.get("printing_mode"))
         if ok and name in ("export_gcode", "save_project") and isinstance(payload, dict):
-            self.events.add("file_saved", kind=name, path=payload.get("path"))
+            self._events.add("file_saved", kind=name, path=payload.get("path"))
 
         text = json.dumps(payload, ensure_ascii=False)
         if len(text) > MAX_TOOL_RESULT_CHARS:
@@ -299,7 +353,7 @@ class Agent:
         last_amount, last_time = self._last_progress
         if amount >= 1.0 or abs(amount - last_amount) >= 0.05 or now - last_time > 2.0:
             self._last_progress = (amount, now)
-            self.events.add("progress", value=round(amount, 3))
+            self._events.add("progress", value=round(amount, 3))
 
 
 def _text_content(content):

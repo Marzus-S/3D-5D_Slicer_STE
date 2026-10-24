@@ -99,6 +99,17 @@ def _label(definition):
     return definition.label
 
 
+def _description(definition):
+    """Описание настройки из слайсера, по возможности на русском (из каталога переводов)."""
+    text = definition.description or ""
+    if _settings_catalog is not None:
+        try:
+            text = _settings_catalog.i18nc("%s description" % definition.key, text) or text
+        except Exception:
+            pass
+    return " ".join(text.split())
+
+
 def _jsonable(value):
     if value is None or isinstance(value, (bool, int, str)):
         return value
@@ -552,6 +563,7 @@ class SlicerTools:
                 "unit": definition.unit or "",
                 "type": definition.type,
                 "enabled": bool(stack.getProperty(key, "enabled")),
+                "description": _description(definition)[:200],
             })
         return {"query": query, "results": results}
 
@@ -571,6 +583,7 @@ class SlicerTools:
             stack = _stack_for(global_stack, definition, extruder)
             entry = {
                 "label": _label(definition),
+                "description": _description(definition),
                 "value": _jsonable(stack.getProperty(key, "value")),
                 "unit": definition.unit or "",
                 "type": definition.type,
@@ -1092,7 +1105,7 @@ def register_tools(registry, tools):
                  "Найти ключи настроек по словам (рус/англ): например «infill», «стенк», «support», «adhesion».",
                  {"query": {"type": "string"}, "limit": {"type": "integer", "default": 15}}, tools.search_settings, required=["query"])
     registry.add("get_settings", "Чтение настроек",
-                 "Значения настроек по ключам: подпись, единицы, допустимые варианты, ошибки валидации.",
+                 "Значения настроек по ключам: подпись, описание из слайсера (на что влияет), единицы, допустимые варианты, ошибки валидации. Используй и для справочных ответов.",
                  {"keys": {"type": "array", "items": {"type": "string"}}, "extruder": {"type": "integer"}},
                  tools.get_settings, required=["keys"])
     registry.add("set_settings", "Изменение настроек",

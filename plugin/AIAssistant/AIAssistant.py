@@ -18,6 +18,7 @@ from .agent.mainthread import run_on_main
 from .agent.mcp import McpHandler
 from .agent.registry import ToolRegistry
 from .agent.server import ChatServer
+from .agent.sessions import SESSION_ID, SessionStore
 from .agent.tools import SlicerTools, register_tools
 
 PREFIX = "aiassistant/"
@@ -36,6 +37,15 @@ DEFAULTS = [
     ("verify_ssl", True),
     ("temperature", 0.2),
 ]
+
+
+def _data_dir():
+    """Папка данных слайсера (%APPDATA%\\steslicer\\7.x) — там храним историю чатов."""
+    try:
+        from UM.Resources import Resources
+        return Resources.getDataStoragePath()
+    except Exception:
+        return tempfile.gettempdir()
 
 
 def _as_bool(value):
@@ -61,7 +71,8 @@ class AIAssistant(QObject, Extension):
         register_tools(self._registry, self._tools)
         self._mcp = McpHandler(self._registry)
         self._agent = Agent(self._registry, self._mcp, self._tools, self._llm_settings,
-                            os.path.join(tempfile.gettempdir(), "ste_ai_uploads"))
+                            os.path.join(tempfile.gettempdir(), "ste_ai_uploads"),
+                            SessionStore(os.path.join(_data_dir(), "aiassistant_chats")))
         self._server = ChatServer(self._web_dir, self, self._token)
 
         self.setMenuName("AI Assistant")
@@ -166,24 +177,42 @@ class AIAssistant(QObject, Extension):
         return {"ok": True, "models": models[:30],
                 "model_found": (not settings["model"]) or settings["model"] in models}
 
-    def api_message(self, text, attachments):
+    def api_message(self, text, attachments, session=None, mode=None):
         try:
-            self._agent.submit(text, attachments)
-        except AgentBusy as e:
+            self._agent.submit(text, attachments, session or None, mode or "engineer")
+        except (AgentBusy, ValueError) as e:
             return {"ok": False, "error": str(e)}
+        return {"ok": True, "session": self._agent.current_id}
+
+    def api_events(self, after, session=""):
+        session = session if SESSION_ID.match(session or "") else self._agent.current_id
+        return {
+            "session": session,
+            "events": self._agent.events_since(session, after),
+            "busy": self._agent.busy,
+            "running": self._agent.running_id,
+        }
+
+    def api_sessions(self):
+        return self._agent.sessions()
+
+    def api_session_new(self):
+        return {"ok": True, "session": self._agent.new_session()}
+
+    def api_session_select(self, session_id):
+        try:
+            return {"ok": True, "session": self._agent.select(session_id)}
         except ValueError as e:
             return {"ok": False, "error": str(e)}
-        return {"ok": True}
 
-    def api_events(self, after):
-        return {"events": self._agent.events.since(after), "busy": self._agent.busy}
-
-    def api_reset(self):
+    def api_session_delete(self, session_id):
         try:
-            self._agent.reset()
+            return {"ok": True, "session": self._agent.delete(session_id)}
         except AgentBusy as e:
             return {"ok": False, "error": str(e)}
-        return {"ok": True}
+
+    def api_reset(self):
+        return {"ok": True, "session": self._agent.reset()}
 
     def api_stop(self):
         self._agent.stop()
