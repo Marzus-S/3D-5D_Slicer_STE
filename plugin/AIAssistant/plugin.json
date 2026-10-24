@@ -1,7 +1,7 @@
 {
     "name": "AI Assistant",
     "author": "Hackathon team",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "description": "Чат-ассистент на базе LLM: подбирает режим 3D/5D, профиль, материал и настройки, ориентирует модель, запускает слайсинг и объясняет решения. Встроенный MCP-сервер.",
     "api": 5,
     "i18n-catalog": "steslicer"
