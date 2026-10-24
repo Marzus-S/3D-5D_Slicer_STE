@@ -39,6 +39,10 @@
 
   var MODE_LABELS = { classic: "3D", cylindrical: "5D Spiral", cylindrical_full: "5D" };
   var CHAT_MODES = ["learning", "novice", "engineer", "pro"];
+  var SAVED_LABELS = { export_gcode: "💾 G-code: ", save_project: "💾 Проект 3MF: ", save_passport: "📋 Паспорт рецепта: " };
+  var CHECK_MARKS = { ok: "✓", info: "ℹ", warn: "⚠", fail: "✗" };
+  var VERDICT_LABELS = { "5d": "5D-советник: печатать в 5D.", "3d": "5D-советник: печатать в 3D.",
+    either: "5D-советник: подходят оба режима." };
 
   var WELCOME = {
     learning: {
@@ -334,8 +338,7 @@
           '<div><div class="k">Режим</div><div class="v">' + escapeHtml(MODE_LABELS[event.mode] || event.mode || "—") + "</div></div>"));
         break;
       case "file_saved":
-        add(div("saved", (event.kind === "export_gcode" ? "💾 G-code: " : "💾 Проект 3MF: ") +
-          "<code>" + escapeHtml(event.path || "") + "</code>"));
+        add(div("saved", (SAVED_LABELS[event.kind] || "💾 Файл: ") + "<code>" + escapeHtml(event.path || "") + "</code>"));
         break;
       case "quiz":
         renderQuiz(event);
@@ -346,6 +349,21 @@
       case "quiz_done":
         renderQuizDone(event, live);
         break;
+      case "preflight": {
+        var rows = (event.checks || []).map(function (c) {
+          return '<li class="' + escapeHtml(c.level) + '"><span class="mark">' + (CHECK_MARKS[c.level] || "·") +
+            "</span>" + escapeHtml(c.text) + "</li>";
+        }).join("");
+        var verdict = VERDICT_LABELS[event.verdict] || "";
+        if (verdict) {
+          var details = (event.blockers || []).join("; ") ||
+            (event.score != null ? "балл " + event.score : "") +
+            (event.base ? ", база ⌀" + event.base + " мм" : "") + (event.decide ? ". " + event.decide : "");
+          verdict = '<div class="verdict"><b>' + verdict + "</b> " + escapeHtml(details) + "</div>";
+        }
+        add(div("preflight", '<div class="title">Предпечатная проверка</div><ul>' + rows + "</ul>" + verdict));
+        break;
+      }
       case "status":
         add(div("msg note", escapeHtml(event.text)));
         break;

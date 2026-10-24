@@ -292,6 +292,16 @@ button:disabled { opacity: .45; cursor: default; }
 }
 .result-card .k { font-size: 11.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
 .result-card .v { font-size: 17px; font-weight: 700; font-family: var(--heading-font); }
+.preflight { margin-left: 40px; padding: 10px 14px; border-radius: var(--radius-sm); background: var(--panel); border: 1px solid var(--line); font-size: 13px; }
+.preflight .title { font-weight: 700; margin-bottom: 4px; }
+.preflight ul { list-style: none; margin: 0; padding: 0; }
+.preflight li { display: flex; gap: 8px; padding: 2px 0; }
+.preflight .mark { flex: none; width: 14px; text-align: center; font-weight: 700; }
+.preflight .ok .mark { color: var(--ok); }
+.preflight .info .mark { color: var(--muted); }
+.preflight .warn .mark { color: var(--warn, #c98a00); }
+.preflight .fail { color: var(--err); }
+.preflight .verdict { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); }
 .saved { margin-left: 40px; font-size: 12.5px; color: var(--muted); }
 .saved code { background: var(--code); padding: 1px 5px; border-radius: 4px; font: 12px var(--mono); }
 
@@ -375,6 +385,6 @@ textarea:focus, input:focus { outline: 2px solid var(--accent); outline-offset: 
   .composer { padding: 10px 14px 8px; }
   .examples { grid-template-columns: minmax(0, 1fr); }
   .msg { max-width: 92%; }
-  .tool, .progress, .result-card, .saved, .quiz { margin-left: 0; }
+  .tool, .progress, .result-card, .saved, .preflight, .quiz { margin-left: 0; }
   .segmented button { padding: 5px 9px; font-size: 12.5px; }
 }
