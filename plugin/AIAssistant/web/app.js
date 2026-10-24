@@ -343,6 +343,9 @@
       case "quiz_answer":
         renderQuizAnswer(event);
         break;
+      case "quiz_done":
+        renderQuizDone(event, live);
+        break;
       case "status":
         add(div("msg note", escapeHtml(event.text)));
         break;
@@ -394,6 +397,35 @@
       (score.total ? '<div class="quiz-score">Решено ' + score.solved + " из " + score.total +
         " · уровень: " + escapeHtml(score.level) + "</div>" : "")));
     scrollDown();
+  }
+
+  // Итог серии вопросов и кнопки «что дальше»: ещё по теме, другая тема или назад к детали.
+  function renderQuizDone(event, live) {
+    var card = div("quiz quiz-done");
+    var score = event.score || {};
+    card.appendChild(div("quiz-question", "Итог: " + event.right + " из " + event.total + " верно" +
+      (event.right === event.total ? ". Отлично!" : ". Разберём ещё?")));
+    if (score.total) card.appendChild(div("quiz-score", "Всего решено " + score.solved + " из " + score.total +
+      " · уровень: " + escapeHtml(score.level)));
+    var row = div("options");
+    var choices = [];
+    if (event.topic) choices.push(["Ещё вопросы: " + (event.topic_label || ""), "/quiz " + event.topic]);
+    choices.push(["Другая тема", "/quiz"]);
+    choices.push(["Вернуться к детали", "Продолжай работу над деталью"]);
+    choices.forEach(function (choice) {
+      var button = document.createElement("button");
+      button.textContent = choice[0];
+      button.disabled = !live;
+      button.onclick = function () {
+        if (busyHere) return;
+        Array.prototype.forEach.call(row.children, function (b) { b.disabled = true; });
+        inputEl.value = choice[1];
+        send();
+      };
+      row.appendChild(button);
+    });
+    card.appendChild(row);
+    add(card);
   }
 
   // ---------- быстрые команды ----------
@@ -571,7 +603,7 @@
   function isLastAssistant(events, event) {
     for (var i = events.length - 1; i >= 0; i--) {
       if (events[i].type === "user") return false;
-      if (events[i].type === "assistant") return events[i] === event;
+      if (events[i].type === "assistant" || events[i].type === "quiz_done") return events[i] === event;
     }
     return false;
   }

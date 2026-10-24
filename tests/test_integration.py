@@ -477,6 +477,9 @@ status, wrong = call("/api/quiz", {"session": cmd_chat, "event": quizzes[1]["id"
 check("quiz wrong answer", bool(wrong.get("ok") and wrong["correct"] is False and wrong["why"]))
 status, data = call("/api/events?after=0&session=" + cmd_chat)
 check("quiz answers in chat", sum(1 for e in data["events"] if e["type"] == "quiz_answer") == 2)
+done = [e for e in data["events"] if e["type"] == "quiz_done"]
+check("quiz summary after last answer", len(done) == 1 and done[0]["right"] == 1 and done[0]["total"] == 2
+      and done[0]["topic"] == "material", str(done))
 
 reviewed = L.review({"mode": "cylindrical_full", "material_id": "enduse_tpu_d70",
                      "values": {"infill_sparse_density": {"value": 15}, "wall_line_count": {"value": 5},
