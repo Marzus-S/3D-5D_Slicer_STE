@@ -268,6 +268,39 @@ def cmd_analyze(run, args):
     return "\n".join(lines) or "Анализ выполнен"
 
 
+def cmd_matinfo(run, args):
+    ok, payload = run("material_info", {"material": " ".join(args)} if args else {})
+    if not ok:
+        return _error(payload)
+    marks = dict((s["key"], i + 1) for i, s in enumerate(payload["sources"]))
+    lines = ["**%s** (%s) — как напечатано" % (payload["label"], payload["material"])]
+    for prop in payload["properties"]:
+        lines.append("- %s: %s %s [%d]" % (prop["label"], _num(prop["value"]), prop["unit"], marks[prop["source"]]))
+    z = payload["z_ratio"]
+    lines.append("- По Z: %s [%d]" % (z["note"], marks[z["source"]]))
+    if payload.get("service_temp_c"):
+        low, high = payload["service_temp_c"]["value"]
+        lines.append("- Рабочая температура: от %d до +%d °C [%d]" % (low, high, marks["printed"]))
+    if payload.get("drying"):
+        dry = payload["drying"]
+        lines.append("- Сушка: %d–%d °C, %d–%d ч%s [%d]" % (dry["temp_c"][0], dry["temp_c"][1], dry["hours"][0],
+                     dry["hours"][1], ", материал гигроскопичен" if payload["hygroscopic"] else "",
+                     marks[dry["source"]]))
+    if payload.get("printblock"):
+        lines.append("- Принтблок 2: %s" % payload["printblock"]["note"])
+    if payload.get("filled_note"):
+        lines.append("- %s" % payload["filled_note"])
+    lines.append("")
+    for i, source in enumerate(payload["sources"]):
+        lines.append("[%d] %s" % (i + 1, "[%s](%s)" % (source["title"], source["url"]) if source["url"]
+                                  else source["title"]))
+    return "\n".join(lines)
+
+
+def _num(value):
+    return ("%g" % value).replace(".", ",")
+
+
 def cmd_passport(run, args):
     ok, payload = run("save_passport", {"name": args[0]} if args else {})
     return "Паспорт рецепта: `%s`" % payload.get("path") if ok else _error(payload)
@@ -316,11 +349,13 @@ COMMANDS = OrderedDict([
     ("saverecipe", (cmd_saverecipe, "/saverecipe имя [описание]", "сохранить текущие настройки как рецепт")),
     ("analyze", (cmd_analyze, "/analyze [нагрузка] [гибкая]",
                  "предпечатная проверка и 5D-советник: кручение, давление, качение, изгиб…")),
+    ("matinfo", (cmd_matinfo, "/matinfo [материал]",
+                 "свойства «как напечатано», сушка и рабочая температура с источниками")),
     ("passport", (cmd_passport, "/passport [папка]", "паспорт рецепта после ручных правок")),
     ("check", (cmd_check, "/check [decor|functional|loaded|sealed|flexible]", "разбор моих настроек")),
     ("quiz", (cmd_quiz, "/quiz [тема]", "проверить себя: вопросы с кнопками")),
 ])
-ALIASES = {"material": "mat", "материал": "mat", "q": "quiz", "r": "recipe", "s": "slice", "?": "help"}
+ALIASES = {"props": "matinfo", "свойства": "matinfo", "material": "mat", "материал": "mat", "q": "quiz", "r": "recipe", "s": "slice", "?": "help"}
 
 
 def catalog():

@@ -256,7 +256,7 @@ check("no token -> 401", status == 401)
 status, _ = call("/api/config", host="evil.example:80")
 check("foreign Host -> 403", status == 403)
 status, cfg = call("/api/config")
-check("config with token", status == 200 and cfg["has_key"] is False and len(cfg["tools"]) == 34, str(len(cfg.get("tools", []))))
+check("config with token", status == 200 and cfg["has_key"] is False and len(cfg["tools"]) == 35, str(len(cfg.get("tools", []))))
 status, cfg = call("/api/config", {"base_url": "http://127.0.0.1:%d/v1" % llm_server.server_port, "api_key": "secret-key"})
 check("set config, key hidden", status == 200 and cfg["has_key"] is True and "secret-key" not in json.dumps(cfg))
 status, test = call("/api/test", {})
@@ -266,7 +266,7 @@ status, init = call("/mcp", {"jsonrpc": "2.0", "id": 1, "method": "initialize", 
 check("mcp initialize", init["result"]["serverInfo"]["name"] == "ste-slicer-ai-assistant")
 status, listed = call("/mcp", {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
 names = [t["name"] for t in listed["result"]["tools"]]
-check("mcp tools/list", len(names) == 34 and "slice" in names and all("inputSchema" in t for t in listed["result"]["tools"]))
+check("mcp tools/list", len(names) == 35 and "slice" in names and all("inputSchema" in t for t in listed["result"]["tools"]))
 status, called = call("/mcp", {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "get_printer_state", "arguments": {}}})
 check("mcp tools/call error path", called["result"]["isError"] is True, called["result"]["content"][0]["text"])
 status, unknown = call("/mcp", {"jsonrpc": "2.0", "id": 4, "method": "nope"})
@@ -298,7 +298,7 @@ check("inline tool call parsed", any(e["type"] == "tool_call" and e["name"] == "
 first_user = REQUESTS[0]["messages"][1]["content"]
 check("model path passed to LLM", "gear.stl" in first_user and "load_model" in first_user)
 check("auto model from /models", REQUESTS[0]["model"] == "mock-gemma")
-check("tools sent to LLM", len(REQUESTS[0]["tools"]) == 34)
+check("tools sent to LLM", len(REQUESTS[0]["tools"]) == 35)
 roles = [m["role"] for m in REQUESTS[-1]["messages"]]
 print("roles in last request:", roles)
 if "--serve" in sys.argv:
@@ -621,9 +621,24 @@ reviewed = L.review({"mode": "cylindrical_full", "material_id": "enduse_tpu_d70"
                                 "adhesion_type": {"value": "brim"}, "speed_print": {"value": 60}},
                      "user_changes": {"infill_sparse_density": 15}}, "loaded")
 keys = [f["key"] for f in reviewed["findings"]]
-check("review finds mistakes", keys == ["infill_sparse_density", "adhesion_type", "printing_mode", "speed_print"]
+check("review finds mistakes", keys == ["infill_sparse_density", "adhesion_type", "printing_mode", "speed_print", "material"]
       and "wall_line_count" in reviewed["ok"], str(keys))
 check("review default purpose", "note" in L.review({"values": {}}, None))
+
+from AIAssistant.agent import materials as M
+pa = M.info("enduse_pa6")
+check("material as printed", pa["family"] == "pa" and pa["drying"]["temp_c"] == [70, 80]
+      and pa["z_ratio"]["value"] == 0.9 and all(p["source"] == "printed" for p in pa["properties"]), str(pa["z_ratio"]))
+check("material families", [M.family_of(m) for m in ("enduse_tpu_d70", "enduse_petg", "fiberpart_pc_g20", "ABS", "x")]
+      == ["flex", "petg", "pc", "abs", None])
+tpu = M.info("enduse_tpu_d70")
+check("no z data falls back to range", tpu["z_ratio"]["source"] == "ornl" and "ornl" in [s["key"] for s in tpu["sources"]])
+check("filled needs second printblock", M.info("fiberpart_pp_g30")["printblock"]["value"] == 2
+      and "printblock" not in pa)
+text = C.execute("/matinfo pa6", lambda tool, args: (True, M.info(args["material"])))
+check("matinfo command cites sources", "50 МПа [1]" in text and "Сушка: 70–80 °C, 8–12 ч" in text
+      and "qidi3d.com" in text, text)
+check("pla not hygroscopic", M.drying_hint("enduse_pla") is None and "сушите" in M.drying_hint("enduse_pa6"))
 
 from AIAssistant.agent.recipes import RecipeStore
 store = RecipeStore(os.path.join(tempfile.mkdtemp(), "r.json"))

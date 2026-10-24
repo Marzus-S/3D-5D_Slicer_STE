@@ -69,8 +69,13 @@
 /mode 5d   /mat pa6   /profile fine   /infill 40   /walls 5   /layers 6   /supports off
 /set wall_line_count=5 speed_print=40   /orient ось   /slice   /export 01_gear   /save 01_gear
 /saverecipe шестерня-PA6   /recipes   /recipe шестерня 01_gear   /check loaded   /quiz материал
-/analyze кручение   /analyze качение гибкая   /passport 01_gear
+/analyze кручение   /analyze качение гибкая   /passport 01_gear   /matinfo pa6
 ```
+
+Справочник материалов «как напечатано» (`agent/materials.py`): прочность вдоль и поперёк слоёв, рабочая
+температура и сушка для ABS, ASA, PLA, PETG, PA, TPU, PC и PP. У каждого числа метка источника: печатные образцы
+из руководства Hybrid 530, режимы сушки QIDI, ORNL или оценка. Чат отвечает по нему инструментом `material_info`,
+`/check` напоминает о сушке гигроскопичных материалов.
 
 Рецепт сохраняет режим, материал, профиль, ориентацию и изменённые настройки; `/recipe` применяет его как
 `apply_plan` (сброс, настройки, нарезка, G-code и 3MF). Рецепты, прогресс квизов и история чатов лежат
@@ -110,6 +115,7 @@ G-code и 3MF, версии слайсера, плагина и LLM. Стату�
    ├─ agent/knowledge.py  — инструкция агента, паспорт принтера, лимиты материалов
    ├─ agent/learning.py   — банк вопросов квиза, правила разбора настроек ученика, прогресс
    ├─ agent/recipes.py    — хранилище рецептов
+   ├─ agent/materials.py  — справочник материалов «как напечатано» с источниками
    ├─ agent/commands.py   — быстрые команды «/…» без LLM
    ├─ agent/llm.py        — клиент OpenAI-совместимого API (Chat Completions + tool calling)
    └─ agent/mainthread.py — безопасный вызов кода в главном потоке (callLater + ожидание)
@@ -125,7 +131,7 @@ OpenAI-совместимый API LLM            API STE Slicer (настрой�
 | Группа | Инструменты |
 |---|---|
 | Состояние | `get_printer_state` |
-| Профили и материалы | `list_quality_profiles`, `set_quality_profile`, `list_materials`, `set_material`, `save_profile` |
+| Профили и материалы | `list_quality_profiles`, `set_quality_profile`, `list_materials`, `material_info`, `set_material`, `save_profile` |
 | Режим | `set_printing_mode` (`classic` / `cylindrical` / `cylindrical_full`) |
 | Настройки | `search_settings`, `get_settings`, `set_settings`, `reset_settings` |
 | Модели | `load_model`, `list_objects`, `analyze_model`, `orient_model`, `rotate_model`, `move_model`, `scale_model`, `arrange_all`, `delete_model` |
