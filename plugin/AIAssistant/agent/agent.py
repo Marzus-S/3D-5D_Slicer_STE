@@ -245,9 +245,7 @@ class Agent:
                     finished_cleanly = True
                     break
                 self._events.add("thinking")
-                message = llm.chat(settings["base_url"], settings["api_key"], model,
-                                   [self._system_message(mode)] + self._history(messages), tools_schema,
-                                   settings["temperature"], settings["verify_ssl"])
+                message = self._chat(settings, model, mode, messages, tools_schema)
                 content = _text_content(message.get("content"))
                 calls = message.get("tool_calls") or []
                 if not calls:
@@ -284,6 +282,7 @@ class Agent:
                 messages.append({"role": "assistant", "content": "(достигнут лимит шагов)"})
                 finished_cleanly = True
         except llm.LLMError as e:
+            Logger.log("e", "[AIAssistant] LLM error: %s", e)
             self._events.add("error", text=str(e))
         except Exception as e:
             Logger.log("e", "[AIAssistant] Agent failed: %s\n%s", e, traceback.format_exc())
@@ -301,6 +300,31 @@ class Agent:
             self._busy = False
             self._running_id = None
             self._events.add("run_end")
+
+    def _chat(self, settings, model, mode, messages, tools_schema):
+        """Запрос к LLM с повтором: временные сбои — до 2 повторов, слишком длинный запрос — сжимаем историю."""
+        compact = False
+        for attempt in range(1, 4):
+            history = self._history(messages)
+            if compact:
+                history = [_compact(m) for m in history]
+            try:
+                return llm.chat(settings["base_url"], settings["api_key"], model,
+                                [self._system_message(mode)] + history, tools_schema,
+                                settings["temperature"], settings["verify_ssl"])
+            except llm.LLMError as e:
+                Logger.log("w", "[AIAssistant] LLM error (attempt %d): %s", attempt, e)
+                text = str(e).lower()
+                if attempt == 3:
+                    raise
+                if not compact and any(w in text for w in ("context", "too long", "token", "length", "1024")):
+                    compact = True
+                    self._events.add("status", text="Запрос к нейросети слишком большой — сокращаю историю и повторяю")
+                elif e.retryable:
+                    self._events.add("status", text="Нейросеть не ответила — повторяю запрос (%d из 2)" % attempt)
+                    time.sleep(3 * attempt)
+                else:
+                    raise
 
     def _auto_model(self, settings):
         models = llm.list_models(settings["base_url"], settings["api_key"], settings["verify_ssl"])
@@ -354,6 +378,16 @@ class Agent:
         if amount >= 1.0 or abs(amount - last_amount) >= 0.05 or now - last_time > 2.0:
             self._last_progress = (amount, now)
             self._events.add("progress", value=round(amount, 3))
+
+
+def _compact(message, limit=1500):
+    """Укорачивает длинные результаты инструментов, чтобы запрос влез в лимит модели."""
+    content = message.get("content")
+    if message.get("role") == "tool" and isinstance(content, str) and len(content) > limit:
+        shorter = dict(message)
+        shorter["content"] = content[:limit] + "…(сокращено)"
+        return shorter
+    return message
 
 
 def _text_content(content):
