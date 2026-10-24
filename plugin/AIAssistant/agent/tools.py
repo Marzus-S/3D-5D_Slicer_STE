@@ -982,10 +982,13 @@ class SlicerTools:
     def slice(self, wait=True, timeout=None):
         if not run_on_main(_scene_nodes):
             raise ToolError("Сцена пуста — нечего нарезать")
+        mode = run_on_main(lambda: _global_stack().getProperty("printing_mode", "value"))
         if timeout is None:
             # 5D-движок (Glicer) строит цилиндрические слои в разы дольше обычной нарезки.
-            mode = run_on_main(lambda: _global_stack().getProperty("printing_mode", "value"))
             timeout = 600 if mode == "classic" else 2400
+        # CuraEngine шлёт прогресс постоянно, а Glicer молчит до конца: 4 минуты тишины в 5D — это
+        # обычная работа, и ранний перезапуск обрывал нарезку по кругу.
+        stall_limit = 240 if mode == "classic" else 900
         if self.watcher.ensure_connected():
             time.sleep(3.0)  # слежение только началось — недавних изменений мы не видели
         # Запускаем нарезку только когда настройки «осели» — иначе слайсер отменит её или упадёт.
@@ -1024,8 +1027,8 @@ class SlicerTools:
             # Нарезку отменили (state вернулся в NotStarted) или она так и не началась — запускаем заново.
             cancelled = was_processing and state == BackendState.NotStarted
             silent = self.watcher.changes == 0 and now - last_start > 10
-            # Движок слайсера иногда «замолкает» посреди 5D-нарезки: ни прогресса, ни смены состояния.
-            stalled = state == BackendState.Processing and now - max(self.watcher.last_activity, last_start) > 240
+            # Движок слайсера иногда «замолкает» посреди нарезки: ни прогресса, ни смены состояния.
+            stalled = state == BackendState.Processing and now - max(self.watcher.last_activity, last_start) > stall_limit
             if stalled:
                 Logger.log("w", "[AIAssistant] Slicing stalled, restarting")
                 run_on_main(lambda: _app().getBackend().stopSlicing())
