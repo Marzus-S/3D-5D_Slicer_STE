@@ -625,6 +625,13 @@ reviewed = L.review({"mode": "cylindrical_full", "material_id": "enduse_tpu_d70"
 keys = [f["key"] for f in reviewed["findings"]]
 check("review finds mistakes", keys == ["infill_sparse_density", "adhesion_type", "printing_mode", "speed_print", "material"]
       and "wall_line_count" in reviewed["ok"], str(keys))
+check("review labels material", reviewed["findings"][-1]["label"] == "Материал")
+fresh_quiz = L.LearningTools(os.path.join(tempfile.mkdtemp(), "p.json"))
+adhesion = [q for q in L.QUESTIONS if q[1] == "adhesion"]
+for q in adhesion[:-1]:
+    fresh_quiz.check(q[0], q[3][0])
+batch = fresh_quiz.quiz("adhesion", 2)["questions"]
+check("quiz fills batch with solved", len(batch) == 2 and batch[0]["id"] == adhesion[-1][0], str([b["id"] for b in batch]))
 check("review default purpose", "note" in L.review({"values": {}}, None))
 
 from AIAssistant.agent import materials as M

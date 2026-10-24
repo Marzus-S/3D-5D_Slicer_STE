@@ -252,6 +252,7 @@ def review(data, purpose=None):
     if drying:
         add("material", "совет", "Материал гигроскопичен", drying + ". Влажный пруток даёт нити, пузыри и "
             "слабые слои.", "material", value=data.get("material_name") or data.get("material_id"))
+        findings[-1]["label"] = "Материал"
 
     result = {
         "purpose": purpose,
@@ -312,7 +313,9 @@ class LearningTools:
             # Сначала то, на что ещё не ответили верно; среди них — темы, где ошибок больше.
             weak = {t: self._accuracy(t) for t in TOPICS}
             fresh = [q for q in pool if not (answers.get(q[0]) or [0])[0]]
-            ordered = sorted(fresh, key=lambda q: (weak[q[1]], random.random())) or random.sample(pool, len(pool))
+            ordered = sorted(fresh, key=lambda q: (weak[q[1]], random.random()))
+            # Нерешённых не хватает — добираем решёнными, чтобы в подходе было count вопросов.
+            ordered += random.sample([q for q in pool if q not in fresh], len(pool) - len(fresh))
         picked = ordered[:count]
         questions = []
         for qid, qtopic, text, options, _ in picked:
