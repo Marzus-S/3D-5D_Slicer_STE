@@ -291,20 +291,34 @@ class _BackendListener:
         self._watcher.on_progress(self._backend_id, amount)
 
 
+class _SettingsListener:
+    def __init__(self, watcher):
+        self._watcher = watcher
+
+    def on_property(self, key, property_name):
+        if property_name == "value":
+            self._watcher.last_setting_change = time.time()
+
+
 class SliceWatcher:
     def __init__(self):
         self._lock = threading.Lock()
         self._listeners = {}
+        self._settings_listener = _SettingsListener(self)
+        self._watched_stacks = set()
         self.active_backend = None
         self.state = None
         self.progress = 0.0
         self.changes = 0
         self.progress_callback = None
+        self.last_setting_change = 0.0
 
     def ensure_connected(self):
-        run_on_main(self._connect)
+        """Подключает слушатели; True — если слежение за настройками только что началось."""
+        return run_on_main(self._connect)
 
     def _connect(self):
+        fresh = False
         for backend_id, backend in _app().getBackendManager().getBackends().items():
             if backend_id in self._listeners:
                 continue
@@ -312,6 +326,25 @@ class SliceWatcher:
             backend.backendStateChange.connect(listener.on_state)
             backend.processingProgress.connect(listener.on_progress)
             self._listeners[backend_id] = listener
+        global_stack = _app().getGlobalContainerStack()
+        if global_stack is not None:
+            for stack in [global_stack] + _extruders(global_stack):
+                if stack.getId() not in self._watched_stacks:
+                    stack.propertyChanged.connect(self._settings_listener.on_property)
+                    self._watched_stacks.add(stack.getId())
+                    fresh = True
+        return fresh
+
+    def wait_settled(self, quiet=2.5, limit=30):
+        """Ждём, пока настройки перестанут меняться и проверка ошибок слайсера закончится. Если менять
+        настройки во время нарезки, слайсер стирает G-code посреди работы движка и падает (KeyError)."""
+        started = time.time()
+        while time.time() - started < limit:
+            checker_busy = run_on_main(lambda: bool(getattr(_app().getMachineErrorChecker(), "needToWaitForResult", False)))
+            if not checker_busy and time.time() - self.last_setting_change >= quiet:
+                return True
+            time.sleep(0.3)
+        return False
 
     def reset(self, backend_id):
         with self._lock:
@@ -871,10 +904,10 @@ class SlicerTools:
     def slice(self, wait=True, timeout=600):
         if not run_on_main(_scene_nodes):
             raise ToolError("Сцена пуста — нечего нарезать")
-        self.watcher.ensure_connected()
-        # После смены настроек слайсер пересчитывает их с задержкой и отменяет уже начатую нарезку —
-        # даём изменениям «осесть» перед запуском.
-        time.sleep(1.5)
+        if self.watcher.ensure_connected():
+            time.sleep(3.0)  # слежение только началось — недавних изменений мы не видели
+        # Запускаем нарезку только когда настройки «осели» — иначе слайсер отменит её или упадёт.
+        self.watcher.wait_settled()
 
         def start():
             backend = _app().getBackend()
@@ -912,7 +945,7 @@ class SlicerTools:
             if (cancelled or silent) and now - last_start > 3:
                 if restarts >= 5:
                     raise ToolError("Слайсер несколько раз отменил нарезку — повторите slice через несколько секунд")
-                time.sleep(1.0)
+                self.watcher.wait_settled()
                 run_on_main(start)
                 restarts += 1
                 last_start = time.time()
@@ -1009,6 +1042,7 @@ class SlicerTools:
         """Применяет все решения разом и доводит проект до G-code и 3MF: меньше шагов — меньше шансов,
         что модель застрянет в исследовании."""
         done = OrderedDict()
+        self.watcher.ensure_connected()
         try:
             done["reset"] = self.reset_settings()["reset"]
             done["mode"] = self.set_printing_mode(printing_mode)["printing_mode"]
