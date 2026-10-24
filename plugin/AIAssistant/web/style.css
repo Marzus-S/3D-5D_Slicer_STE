@@ -223,6 +223,14 @@ button:disabled { opacity: .45; cursor: default; }
 .msg.assistant { background: var(--panel); border: 1px solid var(--line); border-top-left-radius: 4px; box-shadow: var(--shadow); max-width: calc(100% - 40px); }
 .msg.note { color: var(--muted); font-style: italic; padding: 2px 4px 2px 40px; }
 .msg.error { max-width: 100%; width: 100%; background: var(--err-soft); color: var(--err); border: 1px solid var(--err); }
+.err-card .err-title { font-weight: 600; }
+.err-card .err-hint { color: var(--text); margin-top: 3px; }
+.err-card .err-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.err-card .err-actions:empty { display: none; }
+.err-card .err-raw { margin-top: 8px; font-size: 13px; }
+.err-card .err-raw summary { cursor: pointer; }
+.err-card .err-raw code { display: block; margin-top: 4px; white-space: pre-wrap; word-break: break-word; font: 12.5px var(--mono); }
+.err-card .err-code { margin-top: 8px; font: 12px var(--mono); opacity: .75; }
 .msg .files { margin-top: 6px; display: flex; gap: 6px; flex-wrap: wrap; }
 .msg .file { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: rgba(255, 255, 255, .16); }
 
