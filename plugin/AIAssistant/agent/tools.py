@@ -383,7 +383,8 @@ class SlicerTools:
             "quality_name": machine_manager.activeQualityOrQualityChangesName,
             "extruders": extruders,
             "key_settings": settings,
-            "user_changed_settings": user_changes,
+            "user_changed_settings": user_changes[:12],
+            "user_changed_count": len(user_changes),
             "objects": [_node_info(n, i) for i, n in enumerate(_scene_nodes())],
             "slice_state": STATE_NAMES.get(self.watcher.state, "unknown"),
         }
@@ -454,6 +455,8 @@ class SlicerTools:
             description = " ".join((node.getMetaDataEntry("description", "") or "").split())
             properties = node.getMetaDataEntry("properties", {}) or {}
             score = 0
+            if not query and brand != "Stereotech":
+                continue
             if query:
                 # Любое слово запроса (по основе из 4 букв: «шестерня» найдёт «шестерён»), больше совпадений — выше.
                 haystack = " ".join([root_id, name, brand, description]).lower()
@@ -464,7 +467,7 @@ class SlicerTools:
             if root_id == active:
                 item["active"] = True
             if description:
-                item["description"] = description[:260]
+                item["description"] = description[:170]
             items.append(item)
         items.sort(key=lambda i: (-i["_score"], i["brand"] != "Stereotech", i["name"]))
         for item in items:
@@ -560,7 +563,7 @@ class SlicerTools:
                 scored.append((score, key, definition, label))
         scored.sort(key=lambda item: (-item[0], item[1]))
         results = []
-        for _, key, definition, label in scored[:max(1, min(int(limit or 15), 40))]:
+        for _, key, definition, label in scored[:max(1, min(int(limit or 10), 12))]:
             stack = _stack_for(global_stack, definition)
             results.append({
                 "key": key,
@@ -569,7 +572,7 @@ class SlicerTools:
                 "unit": definition.unit or "",
                 "type": definition.type,
                 "enabled": bool(stack.getProperty(key, "enabled")),
-                "description": _description(definition)[:200],
+                "description": _description(definition)[:120],
             })
         return {"query": query, "results": results}
 
@@ -750,12 +753,9 @@ class SlicerTools:
             "object": node.getName(),
             "size_mm": geometry.size_to_printer(analysis["size"]),
             "volume_cm3": round(analysis["volume_mm3"] / 1000.0, 2),
-            "surface_area_cm2": round(analysis["surface_mm2"] / 100.0, 2),
-            "triangles": analysis["triangle_count"],
             "overhang_angle_deg": float(overhang_angle or 45),
             "current_orientation": geometry.format_metrics(current),
-            "best_for_no_supports": [geometry.format_metrics(m) for m in analysis["by_supports"][:3]],
-            "best_for_bed_contact": [geometry.format_metrics(m) for m in analysis["by_contact"][:2]],
+            "best_for_no_supports": [geometry.format_metrics(m) for m in analysis["by_supports"][:2]],
             "revolution": {
                 "is_body_of_revolution": revolution["is_body_of_revolution"],
                 "symmetry": round(revolution["symmetry"], 3),
@@ -1150,7 +1150,7 @@ def register_tools(registry, tools):
                  "Выбрать профиль качества по quality_type (или имени) из list_quality_profiles. Пользовательские изменения сохраняются.",
                  {"quality_type": {"type": "string"}}, tools.set_quality_profile, required=["quality_type"])
     registry.add("list_materials", "Список материалов",
-                 "Материалы, доступные для экструдера, с описанием и плотностью. query — фильтр по словам (например «PA», «гибкий», «шестер»).",
+                 "Материалы Stereotech для экструдера с описанием и плотностью. query — поиск по словам среди всех материалов (например «PA», «гибкий», «шестер»).",
                  {"extruder": {"type": "integer", "default": 0}, "query": {"type": "string"}}, tools.list_materials)
     registry.add("set_material", "Выбор материала",
                  "Назначить материал экструдеру по id из list_materials.",
