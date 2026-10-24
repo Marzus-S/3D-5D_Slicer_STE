@@ -581,6 +581,16 @@ fitted = A._fit_history([{"role": "user", "content": "x"}, {"role": "assistant",
                          {"role": "tool", "tool_call_id": "c10", "content": "{}"}],
                         {"role": "system", "content": "s"}, 0, 3000, {"c9": digest})
 check("history fit keeps verdict for old analysis", "verdict=3d" in fitted[2]["content"])
+task_text = open(os.path.join(os.path.dirname(os.path.abspath(PLUGIN_PARENT)), "prompts", "01_gear.txt"), encoding="utf-8").read()
+catalog = json.dumps({"materials": [{"id": "m%d" % i, "description": "описание " * 20} for i in range(25)]}, ensure_ascii=False)
+one_run = [{"role": "user", "content": task_text},
+           {"role": "assistant", "content": "", "tool_calls": [{"id": "a1"}]}, long_tool,
+           {"role": "assistant", "content": "", "tool_calls": [{"id": "a2"}]},
+           {"role": "tool", "tool_call_id": "a2", "content": catalog}]
+squeezed = A._fit_history(one_run, {"role": "system", "content": "с" * 9000}, 15000, 40000,
+                          {"c9": digest, "a2": A._digest("list_materials", json.loads(catalog))})
+check("history fit never drops the task", squeezed and squeezed[0]["role"] == "user"
+      and squeezed[0]["content"] == task_text and "m24" in squeezed[-1]["content"], str([m["role"] for m in squeezed]))
 g2 = A._LoopGuard()
 broken = {"function": {"name": "set_settings", "arguments": "{}"}}
 for _ in range(3):

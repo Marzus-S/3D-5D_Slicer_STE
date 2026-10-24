@@ -539,11 +539,22 @@ def _fit_history(history, system, tools_size, budget, digests=None):
             candidate = [_compact(m, limit, digests) if i < keep else m for i, m in enumerate(history)]
         if size(candidate) <= budget:
             return candidate
-    # Совсем длинный диалог: отбрасываем старые ходы, начиная новый срез с сообщения пользователя.
-    while len(candidate) > 2 and size(candidate) > budget:
-        candidate = candidate[1:]
-        while candidate and candidate[0].get("role") != "user":
-            candidate = candidate[1:]
+    # Длинный диалог: отбрасываем старые ходы, но не текущую задачу — последнее сообщение пользователя.
+    # Раньше срез шёл до первого «user» после начала, и в одноходовом чате с ТЗ история становилась пустой:
+    # модель видела только инструкцию и переспрашивала, что за деталь.
+    users = [i for i, m in enumerate(candidate) if m.get("role") == "user"]
+    last_user = users[-1] if users else 0
+    start = 0
+    while start < last_user and size(candidate[start:]) > budget:
+        start += 1
+        while start < last_user and candidate[start].get("role") != "user":
+            start += 1
+    candidate = candidate[start:]
+    # Всё ещё много: сжимаем и последний раунд — выжимки вместо полных результатов.
+    for limit in (2000, 1000, 500, 250):
+        if size(candidate) <= budget:
+            break
+        candidate = [_compact(m, limit, digests) for m in candidate]
     return candidate
 
 
