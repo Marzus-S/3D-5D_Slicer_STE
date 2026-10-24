@@ -8,7 +8,9 @@ import urllib.request
 
 
 class LLMError(Exception):
-    pass
+    def __init__(self, message, retryable=False):
+        super().__init__(message)
+        self.retryable = retryable  # временный сбой: перегрузка, таймаут, обрыв связи
 
 
 def _endpoint(base_url, path):
@@ -44,14 +46,14 @@ def _request(url, api_key, payload=None, timeout=180, verify_ssl=True):
             body = response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", errors="replace")[:1500]
-        raise LLMError("LLM вернула HTTP %s: %s" % (e.code, detail))
+        raise LLMError("LLM вернула HTTP %s: %s" % (e.code, detail), retryable=e.code == 429 or e.code >= 500)
     except urllib.error.URLError as e:
         reason = str(e.reason)
         if "CERTIFICATE_VERIFY_FAILED" in reason:
-            reason += " (можно отключить проверку SSL в настройках чата)"
-        raise LLMError("Не удалось подключиться к LLM: %s" % reason)
+            raise LLMError("Не удалось подключиться к LLM: %s (можно отключить проверку SSL в настройках чата)" % reason)
+        raise LLMError("Не удалось подключиться к LLM: %s" % reason, retryable=True)
     except OSError as e:
-        raise LLMError("Ошибка соединения с LLM: %s" % e)
+        raise LLMError("Ошибка соединения с LLM: %s" % e, retryable=True)
     try:
         return json.loads(body)
     except ValueError:
