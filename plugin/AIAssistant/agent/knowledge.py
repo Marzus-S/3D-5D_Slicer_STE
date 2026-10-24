@@ -37,7 +37,8 @@ top_layers, bottom_layers, support_enable, adhesion_type, при 5D — cylindri
 На вопросы о параметрах и дефектах отвечай по описанию настройки из get_settings/search_settings: на что влияет, с чем связана, типичные и текущие значения. Ничего не меняй, пока не попросят.
 
 ## Правила
-- По-русски. Ошибка инструмента — исправь аргументы или смени путь, не повторяй то же самое.
+- Только по-русски (кириллица, латиница для ключей и марок), без иероглифов. Ошибка инструмента — исправь аргументы или смени путь, не повторяй то же самое.
+- Значение отклонено как «вне допустимого диапазона» — возьми значение внутри диапазона. Есть `flow.warning` — снизь speed_print.
 - compare_variants — только по просьбе пользователя.
 - Есть ТЗ или данных достаточно — не задавай вопросов. Вопросы оформляй строкой `Варианты: а | б | Реши сам`.
 - Фото — для понимания назначения детали или дефекта печати.
@@ -47,6 +48,37 @@ top_layers, bottom_layers, support_enable, adhesion_type, при 5D — cylindri
 **Ключевые настройки:** «ключ = значение — зачем». **Ориентация:** …
 **Результат:** время, граммы, пути к G-code и 3MF. **Рекомендации:** сушка, постобработка, риски.
 """
+
+# Паспорта материалов: жёсткие границы настроек сверх min/max самого слайсера. Значение вне границ
+# set_settings и apply_plan не применяют. Ключ — id материала из list_materials (или его начало).
+# Заполняют инженеры по паспортам Stereotech, например:
+#   "enduse_pa6": {"material_print_temperature": (250, 280), "material_bed_temperature": (70, 110)},
+MATERIAL_LIMITS = {}
+
+# Ориентир максимального объёмного расхода хотэнда, мм³/с (Q = скорость × слой × ширина линии).
+# Типовые значения для сопла 0,4 мм — уточнить у инженеров для Hybrid 530. Первое совпадение подстроки в id.
+MAX_VOLUMETRIC_FLOW = [
+    (("tpu", "tpe", "tpv", "sebs", "sealant"), 5.0),   # гибкие: шнек проталкивает хуже
+    (("_g", "_c", "gf", "cf"), 10.0),                  # наполненные волокном
+    ((), 12.0),                                        # остальные
+]
+
+
+def material_limits(material_id):
+    material_id = str(material_id or "").lower()
+    for key, limits in MATERIAL_LIMITS.items():
+        if material_id.startswith(key.lower()):
+            return limits
+    return {}
+
+
+def max_volumetric_flow(material_id):
+    material_id = str(material_id or "").lower()
+    for needles, limit in MAX_VOLUMETRIC_FLOW:
+        if not needles or any(n in material_id for n in needles):
+            return limit
+    return MAX_VOLUMETRIC_FLOW[-1][1]
+
 
 # Режим общения выбирается в шапке чата и добавляется к системной инструкции.
 MODE_PROMPTS = {
