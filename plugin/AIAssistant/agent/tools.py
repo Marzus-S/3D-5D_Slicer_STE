@@ -5,6 +5,7 @@
 import json
 import os
 import re
+import tempfile
 import threading
 import time
 from collections import OrderedDict
@@ -1001,6 +1002,46 @@ class SlicerTools:
             raise ToolError("Не удалось сохранить проект 3MF")
         return {"path": target, "size_kb": round(os.path.getsize(target) / 1024.0, 1)}
 
+    # ------------------------------------------------------------------ конвейер
+
+    def apply_plan(self, printing_mode, material_id, quality_type=None, orientation="min_supports",
+                   settings=None, name=None, object=None):
+        """Применяет все решения разом и доводит проект до G-code и 3MF: меньше шагов — меньше шансов,
+        что модель застрянет в исследовании."""
+        done = OrderedDict()
+        try:
+            done["reset"] = self.reset_settings()["reset"]
+            done["mode"] = self.set_printing_mode(printing_mode)["printing_mode"]
+            done["material"] = self.set_material(material_id)["material"]
+            if quality_type:
+                done["quality"] = self.set_quality_profile(quality_type)["name"]
+            if orientation and orientation != "none":
+                oriented = self.orient_model(object, orientation)
+                done["orientation"] = {"goal": orientation, "after": oriented["after"], "object": oriented["object"]}
+            if settings:
+                applied = self.set_settings(settings)
+                done["settings"] = {c["key"]: c["new"] for c in applied["changed"]}
+                if applied["errors"]:
+                    done["settings_errors"] = applied["errors"]
+            done["slice"] = self.slice(wait=True)
+            done["gcode"] = self.export_gcode(name=name)
+            done["project"] = self.save_project(name=name)
+        except ToolError as e:
+            raise ToolError("План применён частично (%s), остановился на ошибке: %s"
+                            % (", ".join(done.keys()) or "ничего", e))
+        gcode = done["gcode"]
+        return {
+            "applied": {k: v for k, v in done.items() if k not in ("slice", "gcode", "project")},
+            "print_time": done["slice"]["print_time"],
+            "print_time_seconds": done["slice"]["print_time_seconds"],
+            "total_weight_g": done["slice"]["total_weight_g"],
+            "printing_mode": done["slice"]["printing_mode"],
+            "gcode_path": gcode["path"],
+            "gcode_valid": gcode["valid"],
+            "gcode_issues": gcode["issues"],
+            "project_path": done["project"]["path"],
+        }
+
     # ------------------------------------------------------------------ сравнение вариантов
 
     def compare_variants(self, variants):
@@ -1079,7 +1120,9 @@ def _resolve_model_path(path):
     by_name = None
     seen = 0
     home = os.path.expanduser("~")
-    for root in [os.path.join(home, "Documents"), os.path.join(home, "Desktop"), os.path.join(home, "Downloads")]:
+    roots = [os.path.join(tempfile.gettempdir(), "ste_ai_uploads"), os.path.join(home, "Documents"),
+             os.path.join(home, "Desktop"), os.path.join(home, "Downloads")]
+    for root in roots:
         if not os.path.isdir(root):
             continue
         base_depth = root.rstrip(os.sep).count(os.sep)
@@ -1222,6 +1265,18 @@ def register_tools(registry, tools):
     registry.add("save_project", "Сохранение 3MF",
                  "Сохранить проект 3MF со всеми настройками (по умолчанию <папка результатов>/<name>/project.3mf).",
                  {"name": {"type": "string"}, "path": {"type": "string"}}, tools.save_project)
+    registry.add("apply_plan", "Применение плана",
+                 "ГЛАВНЫЙ ШАГ. Одним вызовом: сброс старых настроек, режим, материал, профиль, ориентация, ключевые "
+                 "настройки, слайсинг, экспорт G-code и сохранение 3MF. Вызывай после analyze_model и выбора материала.",
+                 {"printing_mode": {"type": "string", "enum": list(PRINTING_MODES.keys())},
+                  "material_id": {"type": "string", "description": "id из list_materials"},
+                  "quality_type": {"type": "string", "description": "quality_type из list_quality_profiles: high, normal, fast, draft…"},
+                  "orientation": {"type": "string", "enum": ["min_supports", "max_contact", "axis_vertical", "none"]},
+                  "settings": {"type": "object", "additionalProperties": True,
+                               "description": "ключевые настройки, например {\"wall_line_count\": 5, \"infill_sparse_density\": 60}"},
+                  "name": {"type": "string", "description": "имя папки результатов, например 01_gear"},
+                  "object": obj},
+                 tools.apply_plan, required=["printing_mode", "material_id"])
     registry.add("compare_variants", "Сравнение вариантов",
                  "Нарезать 1–4 варианта настроек и сравнить время и расход материала. "
                  "Вариант: {label, quality_type?, material_id?, settings?}. Исходное состояние восстанавливается.",
