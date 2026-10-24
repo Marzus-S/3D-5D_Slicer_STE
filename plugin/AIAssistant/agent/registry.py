@@ -12,7 +12,7 @@ class ToolError(Exception):
 
 
 class Tool:
-    def __init__(self, name, title, description, properties, func, required=()):
+    def __init__(self, name, title, description, properties, func, required=(), modes=None):
         self.name = name
         self.title = title
         self.description = description
@@ -22,6 +22,7 @@ class Tool:
             "required": list(required),
         }
         self.func = func
+        self.modes = set(modes) if modes else None  # режимы чата, в которых модель видит инструмент; None — во всех
         self._accepted = set(inspect.signature(func).parameters.keys())
 
     def filter_args(self, args):
@@ -32,8 +33,8 @@ class ToolRegistry:
     def __init__(self):
         self._tools = OrderedDict()
 
-    def add(self, name, title, description, properties, func, required=()):
-        self._tools[name] = Tool(name, title, description, properties, func, required)
+    def add(self, name, title, description, properties, func, required=(), modes=None):
+        self._tools[name] = Tool(name, title, description, properties, func, required, modes)
 
     def has(self, name):
         return name in self._tools
@@ -45,11 +46,12 @@ class ToolRegistry:
     def names(self):
         return list(self._tools.keys())
 
-    def llm_tools(self):
+    def llm_tools(self, mode=None):
+        """Описания для LLM. С mode — только инструменты этого режима чата: меньше запрос, меньше соблазнов."""
         return [{
             "type": "function",
             "function": {"name": t.name, "description": t.description, "parameters": t.schema},
-        } for t in self._tools.values()]
+        } for t in self._tools.values() if mode is None or t.modes is None or mode in t.modes]
 
     def mcp_tools(self):
         return [{

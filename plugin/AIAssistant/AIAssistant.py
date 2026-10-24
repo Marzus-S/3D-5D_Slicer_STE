@@ -13,9 +13,12 @@ from UM.Logger import Logger
 from UM.Message import Message
 
 from .agent import llm
+from .agent import commands
 from .agent.agent import Agent, AgentBusy
+from .agent.learning import LearningTools
 from .agent.mainthread import run_on_main
 from .agent.mcp import McpHandler
+from .agent.recipes import RecipeStore
 from .agent.registry import ToolRegistry
 from .agent.server import ChatServer
 from .agent.sessions import SESSION_ID, SessionStore
@@ -68,11 +71,13 @@ class AIAssistant(QObject, Extension):
         self._token = binascii.hexlify(os.urandom(16)).decode("ascii")
         self._registry = ToolRegistry()
         self._tools = SlicerTools(self._output_dir)
-        register_tools(self._registry, self._tools)
+        self._tools.recipes = RecipeStore(os.path.join(_data_dir(), "aiassistant_recipes.json"))
+        self._learning = LearningTools(os.path.join(_data_dir(), "aiassistant_progress.json"))
+        register_tools(self._registry, self._tools, self._learning)
         self._mcp = McpHandler(self._registry)
         self._agent = Agent(self._registry, self._mcp, self._tools, self._llm_settings,
                             os.path.join(tempfile.gettempdir(), "ste_ai_uploads"),
-                            SessionStore(os.path.join(_data_dir(), "aiassistant_chats")))
+                            SessionStore(os.path.join(_data_dir(), "aiassistant_chats")), self._learning)
         self._server = ChatServer(self._web_dir, self, self._token)
 
         self.setMenuName("AI Assistant")
@@ -183,6 +188,16 @@ class AIAssistant(QObject, Extension):
         except (AgentBusy, ValueError) as e:
             return {"ok": False, "error": str(e)}
         return {"ok": True, "session": self._agent.current_id}
+
+    def api_commands(self):
+        return {"commands": commands.catalog(), "progress": self._learning.score()}
+
+    def api_quiz(self, session, quiz_event, choice):
+        try:
+            result = self._agent.answer_quiz(session or None, int(quiz_event), str(choice))
+        except (TypeError, ValueError) as e:
+            return {"ok": False, "error": str(e)}
+        return dict(result, ok=True)
 
     def api_events(self, after, session=""):
         session = session if SESSION_ID.match(session or "") else self._agent.current_id

@@ -156,6 +156,8 @@ def _make_handler(server):
                     return self._send(200, server._api.api_get_config())
                 if path == "/api/state":
                     return self._send(200, server._api.api_state())
+                if path == "/api/commands":
+                    return self._send(200, server._api.api_commands())
             except Exception as e:
                 Logger.log("w", "[AIAssistant] GET %s failed: %s", path, e)
                 return self._send(500, {"error": str(e)})
@@ -195,6 +197,8 @@ def _make_handler(server):
                     return self._send(200, server._api.api_reset())
                 if path == "/api/stop":
                     return self._send(200, server._api.api_stop())
+                if path == "/api/quiz":
+                    return self._send(200, server._api.api_quiz(body.get("session"), body.get("event"), body.get("choice")))
             except ValueError as e:
                 return self._send(400, {"error": str(e)})
             except Exception as e:

@@ -256,7 +256,7 @@ check("no token -> 401", status == 401)
 status, _ = call("/api/config", host="evil.example:80")
 check("foreign Host -> 403", status == 403)
 status, cfg = call("/api/config")
-check("config with token", status == 200 and cfg["has_key"] is False and len(cfg["tools"]) == 28, str(len(cfg.get("tools", []))))
+check("config with token", status == 200 and cfg["has_key"] is False and len(cfg["tools"]) == 33, str(len(cfg.get("tools", []))))
 status, cfg = call("/api/config", {"base_url": "http://127.0.0.1:%d/v1" % llm_server.server_port, "api_key": "secret-key"})
 check("set config, key hidden", status == 200 and cfg["has_key"] is True and "secret-key" not in json.dumps(cfg))
 status, test = call("/api/test", {})
@@ -266,7 +266,7 @@ status, init = call("/mcp", {"jsonrpc": "2.0", "id": 1, "method": "initialize", 
 check("mcp initialize", init["result"]["serverInfo"]["name"] == "ste-slicer-ai-assistant")
 status, listed = call("/mcp", {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
 names = [t["name"] for t in listed["result"]["tools"]]
-check("mcp tools/list", len(names) == 28 and "slice" in names and all("inputSchema" in t for t in listed["result"]["tools"]))
+check("mcp tools/list", len(names) == 33 and "slice" in names and all("inputSchema" in t for t in listed["result"]["tools"]))
 status, called = call("/mcp", {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "get_printer_state", "arguments": {}}})
 check("mcp tools/call error path", called["result"]["isError"] is True, called["result"]["content"][0]["text"])
 status, unknown = call("/mcp", {"jsonrpc": "2.0", "id": 4, "method": "nope"})
@@ -298,7 +298,7 @@ check("inline tool call parsed", any(e["type"] == "tool_call" and e["name"] == "
 first_user = REQUESTS[0]["messages"][1]["content"]
 check("model path passed to LLM", "gear.stl" in first_user and "load_model" in first_user)
 check("auto model from /models", REQUESTS[0]["model"] == "mock-gemma")
-check("tools sent to LLM", len(REQUESTS[0]["tools"]) == 28)
+check("tools sent to LLM", len(REQUESTS[0]["tools"]) == 33)
 roles = [m["role"] for m in REQUESTS[-1]["messages"]]
 print("roles in last request:", roles)
 if "--serve" in sys.argv:
@@ -362,6 +362,7 @@ check("loop guard on repeats", warns[:2] == [False, False] and warns[2] and g.tr
 
 # ---------------- жёсткие диапазоны, расход Q, проверка G-code ----------------
 from AIAssistant.agent import knowledge as K
+from AIAssistant.agent import learning as L
 
 
 class RangeStack:
@@ -410,6 +411,93 @@ check("gcode: 5D with A/C", rotary["valid"] and rotary["axes_range"]["A"] == [90
 no_park = T._check_gcode(gcode("park.gcode", "M109 S260\nG1 X10 Y10 Z0.2 E1\n"), bed)
 check("gcode: missing park warned", no_park["valid"] and len(no_park["warnings"]) == 2)
 check("foreign script stripped", A._strip_foreign_script("стенка 核心区 под профиль") == "стенка  под профиль")
+
+# ---------------- режимы чата, быстрые команды, квиз, рецепты, разбор настроек ----------------
+def run_until_end(session):
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        status, data = call("/api/events?after=0&session=" + session)
+        if not data["busy"] and any(e["type"] == "run_end" for e in data["events"]):
+            return data["events"]
+        time.sleep(0.2)
+    return data["events"]
+
+
+g = A._LoopGuard()
+broken = {"function": {"name": "slice", "arguments": "{}"}}
+for i in range(3):
+    g.record(dict(broken, function={"name": "slice", "arguments": '{"n": %d}' % i}), '{"error": "нет модели"}')
+check("loop guard counts failures", bool(g.check({"function": {"name": "slice", "arguments": '{"n": 9}'}})))
+
+status, new = call("/api/sessions/new", {})
+modes_chat = new["session"]
+before = len(REQUESTS)
+call("/api/message", {"text": "научи меня", "session": modes_chat, "mode": "learning"})
+run_until_end(modes_chat)
+learning_request = REQUESTS[before]
+learning_tools = [t["function"]["name"] for t in learning_request["tools"]]
+check("learning prompt used", "Режим общения: обучение" in learning_request["messages"][0]["content"])
+check("learning mode tools", "quiz" in learning_tools and "review_my_settings" in learning_tools
+      and "apply_recipe" not in learning_tools, str(len(learning_tools)))
+before = len(REQUESTS)
+call("/api/message", {"text": "шестерня", "session": modes_chat, "mode": "pro"})
+run_until_end(modes_chat)
+pro_tools = [t["function"]["name"] for t in REQUESTS[before]["tools"]]
+check("pro mode tools", "apply_recipe" in pro_tools and "quiz" not in pro_tools
+      and "Режим общения: профи" in REQUESTS[before]["messages"][0]["content"])
+
+status, new = call("/api/sessions/new", {})
+cmd_chat = new["session"]
+before = len(REQUESTS)
+call("/api/message", {"text": "/help", "session": cmd_chat, "mode": "pro"})
+evs = run_until_end(cmd_chat)
+check("command answered without LLM", len(REQUESTS) == before and any(
+    e["type"] == "assistant" and "/infill" in e["text"] and e.get("command_seconds") is not None for e in evs))
+call("/api/message", {"text": "/infill 40", "session": cmd_chat, "mode": "pro"})
+evs = run_until_end(cmd_chat)
+check("command calls tool directly", len(REQUESTS) == before and any(
+    e["type"] == "tool_call" and e["name"] == "set_settings" and e["args"] == {"settings": {"infill_sparse_density": 40}}
+    for e in evs))
+call("/api/message", {"text": "/nope", "session": cmd_chat})
+evs = run_until_end(cmd_chat)
+check("unknown command explained", any(e["type"] == "assistant" and "/help" in e["text"] for e in evs[-3:]))
+status, listed_cmds = call("/api/commands")
+check("commands catalog", any(c["name"] == "recipe" for c in listed_cmds["commands"]) and "level" in listed_cmds["progress"])
+
+call("/api/message", {"text": "/quiz материал", "session": cmd_chat})
+evs = run_until_end(cmd_chat)
+quizzes = [e for e in evs if e["type"] == "quiz"]
+check("quiz shown as cards", len(quizzes) == 2 and all(len(q["options"]) >= 2 for q in quizzes), str(len(quizzes)))
+question = next(q for q in L.QUESTIONS if q[0] == quizzes[0]["qid"]) if quizzes else None
+status, answer = call("/api/quiz", {"session": cmd_chat, "event": quizzes[0]["id"], "choice": question[3][0]})
+check("quiz answer checked by code", answer.get("ok") and answer["correct"] is True and answer["score"]["solved"] >= 1, str(answer))
+status, again = call("/api/quiz", {"session": cmd_chat, "event": quizzes[0]["id"], "choice": question[3][1]})
+check("quiz answered once", again.get("ok") is False)
+status, wrong = call("/api/quiz", {"session": cmd_chat, "event": quizzes[1]["id"], "choice": "не тот ответ"})
+check("quiz wrong answer", bool(wrong.get("ok") and wrong["correct"] is False and wrong["why"]))
+status, data = call("/api/events?after=0&session=" + cmd_chat)
+check("quiz answers in chat", sum(1 for e in data["events"] if e["type"] == "quiz_answer") == 2)
+
+reviewed = L.review({"mode": "cylindrical_full", "material_id": "enduse_tpu_d70",
+                     "values": {"infill_sparse_density": {"value": 15}, "wall_line_count": {"value": 5},
+                                "top_layers": {"value": 6}, "bottom_layers": {"value": 6},
+                                "adhesion_type": {"value": "brim"}, "speed_print": {"value": 60}},
+                     "user_changes": {"infill_sparse_density": 15}}, "loaded")
+keys = [f["key"] for f in reviewed["findings"]]
+check("review finds mistakes", keys == ["infill_sparse_density", "adhesion_type", "printing_mode", "speed_print"]
+      and "wall_line_count" in reviewed["ok"], str(keys))
+check("review default purpose", "note" in L.review({"values": {}}, None))
+
+from AIAssistant.agent.recipes import RecipeStore
+store = RecipeStore(os.path.join(tempfile.mkdtemp(), "r.json"))
+store.put({"name": "Шестерня PA6", "printing_mode": "classic", "material_id": "enduse_pa6", "settings": {"wall_line_count": 5}})
+store.put({"name": "Ролик 5D", "printing_mode": "cylindrical_full", "material_id": "enduse_tpu_d70"})
+check("recipe by part of name", store.get("шестерня")["material_id"] == "enduse_pa6")
+try:
+    store.get("нет такого")
+    check("unknown recipe raises", False)
+except ValueError as e:
+    check("unknown recipe lists names", "Ролик 5D" in str(e))
 
 print("\n%d/%d checks passed" % (sum(checks), len(checks)))
 sys.exit(0 if all(checks) else 1)
