@@ -318,6 +318,10 @@ textarea:focus, input:focus { outline: 2px solid var(--accent); outline-offset: 
 .modal-card label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 10px; }
 .modal-card input:not([type=checkbox]) { display: block; width: 100%; margin-top: 4px; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--line); background: var(--panel-2); color: var(--text); font: inherit; }
 .modal-card .check { display: flex; align-items: center; gap: 8px; color: var(--text); }
+.key-state { font-size: 12px; font-weight: 600; margin-left: 6px; }
+.key-state.ok { color: var(--ok); }
+.key-state.missing { color: var(--err); }
+.key-note { display: block; font-size: 11.5px; margin-top: 4px; color: var(--muted); }
 .cfg-info { font-size: 13px; min-height: 20px; margin: 4px 0 10px; }
 .cfg-info.ok { color: var(--ok); }
 .cfg-info.err { color: var(--err); }
