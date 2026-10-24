@@ -150,25 +150,29 @@ def _number(value):
 
 
 def _range_problem(stack, key, value, material_id=None):
-    """Жёсткие границы: min/max самой настройки и паспорт материала из knowledge. Возвращает
-    (ошибка, предупреждение): при ошибке значение не применяется, предупреждение только сообщается."""
+    """Границы для агента: min/max настройки, её рекомендуемый диапазон (у части настроек слайсер задаёт
+    только его — например, заполнение до 100 %) и паспорт материала из knowledge. Возвращает текст
+    ошибки или None; значение с ошибкой не применяется. Человек вручную может выйти за рекомендуемый
+    диапазон, агент — нет."""
     number = _number(value)
     if number is None or isinstance(value, bool):
-        return None, None
-    low, high = _number(stack.getProperty(key, "minimum_value")), _number(stack.getProperty(key, "maximum_value"))
+        return None
+    low, high = None, None
+    for prop_low, prop_high in (("minimum_value", "maximum_value"), ("minimum_value_warning", "maximum_value_warning")):
+        bound = _number(stack.getProperty(key, prop_low))
+        if bound is not None:
+            low = bound if low is None else max(low, bound)
+        bound = _number(stack.getProperty(key, prop_high))
+        if bound is not None:
+            high = bound if high is None else min(high, bound)
     passport = knowledge.material_limits(material_id).get(key)
     if passport:
         low = passport[0] if low is None else max(low, passport[0])
         high = passport[1] if high is None else min(high, passport[1])
     if (low is not None and number < low) or (high is not None and number > high):
         return "значение %s вне допустимого диапазона [%s; %s]" % (
-            _jsonable(value), "—" if low is None else _jsonable(low), "—" if high is None else _jsonable(high)), None
-    warn_low = _number(stack.getProperty(key, "minimum_value_warning"))
-    warn_high = _number(stack.getProperty(key, "maximum_value_warning"))
-    if (warn_low is not None and number < warn_low) or (warn_high is not None and number > warn_high):
-        return None, "вне рекомендуемого диапазона [%s; %s]" % (
-            "—" if warn_low is None else _jsonable(warn_low), "—" if warn_high is None else _jsonable(warn_high))
-    return None, None
+            _jsonable(value), "—" if low is None else _jsonable(low), "—" if high is None else _jsonable(high))
+    return None
 
 
 def _material_id(stack):
@@ -732,7 +736,7 @@ class SlicerTools:
                 stacks = [_extruder(global_stack, extruder)] if extruder is not None else _extruders(global_stack)
             else:
                 stacks = [global_stack]
-            out_of_range, warning = _range_problem(stacks[0], key, value, _material_id(stacks[0]))
+            out_of_range = _range_problem(stacks[0], key, value, _material_id(stacks[0]))
             if out_of_range:
                 errors.append({"key": key, "error": out_of_range + " — значение не применено"})
                 continue
@@ -744,8 +748,6 @@ class SlicerTools:
             problem = _validation(stacks[0], definition)
             if problem:
                 entry["validation"] = problem
-            if warning:
-                entry["warning"] = warning
             changed.append(entry)
         result = {"changed": changed, "errors": errors}
         flow = _flow_check(global_stack)
@@ -1157,9 +1159,6 @@ class SlicerTools:
                 done["settings"] = {c["key"]: c["new"] for c in applied["changed"]}
                 if applied["errors"]:
                     done["settings_errors"] = applied["errors"]
-                warnings = {c["key"]: c["warning"] for c in applied["changed"] if c.get("warning")}
-                if warnings:
-                    done["settings_warnings"] = warnings
             flow = run_on_main(lambda: _flow_check(_global_stack()))
             if flow:
                 done["flow"] = flow
@@ -1328,8 +1327,9 @@ def _check_gcode(path, limits=None):
     nozzle, bed = [], []
     with open(path, "rt", encoding="utf-8", errors="replace") as stream:
         for number, line in enumerate(stream):
-            if number < 40 and line.startswith(";") and len(header) < 12:
-                header.append(line.strip())
+            # Миниатюра ;PREVIEW — килобайты base64, в ответе модели она только съедает лимит запроса.
+            if number < 40 and line.startswith(";") and not line.startswith(";PREVIEW") and len(header) < 12:
+                header.append(line.strip()[:120])
             if line.startswith(("G0 ", "G1 ", "G2 ", "G3 ")):
                 moves += 1
                 for axis, value in _axis_values(line).items():
