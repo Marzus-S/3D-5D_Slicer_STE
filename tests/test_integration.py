@@ -245,7 +245,7 @@ checks = []
 
 
 def check(name, cond, extra=""):
-    checks.append(cond)
+    checks.append(bool(cond))
     print("%s %s %s" % ("PASS" if cond else "FAIL", name, extra))
 
 
@@ -256,7 +256,7 @@ check("no token -> 401", status == 401)
 status, _ = call("/api/config", host="evil.example:80")
 check("foreign Host -> 403", status == 403)
 status, cfg = call("/api/config")
-check("config with token", status == 200 and cfg["has_key"] is False and len(cfg["tools"]) == 28, str(len(cfg.get("tools", []))))
+check("config with token", status == 200 and cfg["has_key"] is False and len(cfg["tools"]) == 29, str(len(cfg.get("tools", []))))
 status, cfg = call("/api/config", {"base_url": "http://127.0.0.1:%d/v1" % llm_server.server_port, "api_key": "secret-key"})
 check("set config, key hidden", status == 200 and cfg["has_key"] is True and "secret-key" not in json.dumps(cfg))
 status, test = call("/api/test", {})
@@ -266,7 +266,7 @@ status, init = call("/mcp", {"jsonrpc": "2.0", "id": 1, "method": "initialize", 
 check("mcp initialize", init["result"]["serverInfo"]["name"] == "ste-slicer-ai-assistant")
 status, listed = call("/mcp", {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
 names = [t["name"] for t in listed["result"]["tools"]]
-check("mcp tools/list", len(names) == 28 and "slice" in names and all("inputSchema" in t for t in listed["result"]["tools"]))
+check("mcp tools/list", len(names) == 29 and "slice" in names and all("inputSchema" in t for t in listed["result"]["tools"]))
 status, called = call("/mcp", {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "get_printer_state", "arguments": {}}})
 check("mcp tools/call error path", called["result"]["isError"] is True, called["result"]["content"][0]["text"])
 status, unknown = call("/mcp", {"jsonrpc": "2.0", "id": 4, "method": "nope"})
@@ -298,7 +298,7 @@ check("inline tool call parsed", any(e["type"] == "tool_call" and e["name"] == "
 first_user = REQUESTS[0]["messages"][1]["content"]
 check("model path passed to LLM", "gear.stl" in first_user and "load_model" in first_user)
 check("auto model from /models", REQUESTS[0]["model"] == "mock-gemma")
-check("tools sent to LLM", len(REQUESTS[0]["tools"]) == 28)
+check("tools sent to LLM", len(REQUESTS[0]["tools"]) == 29)
 roles = [m["role"] for m in REQUESTS[-1]["messages"]]
 print("roles in last request:", roles)
 if "--serve" in sys.argv:
@@ -410,6 +410,128 @@ check("gcode: 5D with A/C", rotary["valid"] and rotary["axes_range"]["A"] == [90
 no_park = T._check_gcode(gcode("park.gcode", "M109 S260\nG1 X10 Y10 Z0.2 E1\n"), bed)
 check("gcode: missing park warned", no_park["valid"] and len(no_park["warnings"]) == 2)
 check("foreign script stripped", A._strip_foreign_script("стенка 核心区 под профиль") == "стенка  под профиль")
+check("task text without attachment list", A._first_user_text(
+    [{"role": "user", "content": "Колесо конвейера\n\n[Приложены 3D-модели — загрузи их через load_model]\n- a.stl: C:/a.stl"}])
+      == "Колесо конвейера")
+
+# ---------------- предпечатная проверка и 5D-советник на синтетических сетках ----------------
+import hashlib
+import math
+import numpy
+from AIAssistant.agent import advisor as V, geometry as G, passport as P
+
+
+def oriented(triangles, outward):
+    """Порядок вершин так, чтобы нормаль смотрела в сторону outward (ось сцены Y — вверх)."""
+    triangles = numpy.array(triangles, dtype=float)
+    normals = numpy.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
+    flip = (normals * numpy.array(outward, dtype=float)).sum(axis=1) < 0
+    triangles[flip] = triangles[flip][:, [0, 2, 1]]
+    return triangles
+
+
+def box(sx, sy, sz, origin=(0, 0, 0)):
+    o = numpy.array(origin, dtype=float)
+    c = [o + numpy.array([x * sx, y * sy, z * sz]) for x in (0, 1) for y in (0, 1) for z in (0, 1)]
+    faces = [((0, 1, 3, 2), (-1, 0, 0)), ((4, 6, 7, 5), (1, 0, 0)), ((0, 4, 5, 1), (0, -1, 0)),
+             ((2, 3, 7, 6), (0, 1, 0)), ((0, 2, 6, 4), (0, 0, -1)), ((1, 5, 7, 3), (0, 0, 1))]
+    tris, out = [], []
+    for (a, b, d, e), normal in faces:
+        tris += [[c[a], c[b], c[d]], [c[a], c[d], c[e]]]
+        out += [normal, normal]
+    return oriented(tris, out)
+
+
+def tube(outer, inner, length, segments=96):
+    """Труба (inner > 0) или цилиндр (inner = 0) вдоль оси Y сцены."""
+    tris, out = [], []
+    for i in range(segments):
+        a0, a1 = 2 * math.pi * i / segments, 2 * math.pi * (i + 1) / segments
+        ring = lambda r, a, y: [r * math.cos(a), y, r * math.sin(a)]
+        mid = (a0 + a1) / 2
+        radial = [math.cos(mid), 0, math.sin(mid)]
+        for r, sign in ((outer, 1),) + (((inner, -1),) if inner else ()):
+            p = [ring(r, a0, 0), ring(r, a1, 0), ring(r, a1, length), ring(r, a0, length)]
+            tris += [[p[0], p[1], p[2]], [p[0], p[2], p[3]]]
+            out += [[sign * v for v in radial]] * 2
+        for y, normal in ((0, [0, -1, 0]), (length, [0, 1, 0])):
+            if inner:
+                p = [ring(inner, a0, y), ring(outer, a0, y), ring(outer, a1, y), ring(inner, a1, y)]
+                tris += [[p[0], p[1], p[2]], [p[0], p[2], p[3]]]
+                out += [normal, normal]
+            else:
+                tris.append([[0, y, 0], ring(outer, a0, y), ring(outer, a1, y)])
+                out.append(normal)
+    return oriented(tris, out)
+
+
+def inspect(triangles, load=None, flexible=False):
+    analysis = G.analyze(triangles.reshape(-1, 3))
+    health = G.mesh_health(analysis["triangles"])
+    thickness = G.wall_thickness(analysis["triangles"], analysis["normals"], analysis["areas"])
+    levels = {c["id"]: c for c in V.preflight(analysis, health, thickness, density=1.2)["checks"]}
+    return analysis, health, levels, V.five_axis(analysis, load, flexible, density=1.2)
+
+
+cube, cube_health, cube_checks, _ = inspect(box(20, 20, 20))
+check("preflight: clean cube", cube_health["watertight"] and cube_health["bodies"] == 1
+      and all(c["level"] == "ok" for c in cube_checks.values()), str(cube_checks))
+_, _, inch_checks, _ = inspect(box(2, 1, 1.5))
+check("preflight: inches suspected with ×25.4 fix", inch_checks["units"]["level"] == "fail"
+      and inch_checks["units"]["fix"]["args"]["percent"] == 2540, str(inch_checks["units"]))
+_, open_health, open_checks, _ = inspect(box(20, 20, 20)[:-2])
+check("preflight: hole in mesh", open_health["open_edges"] > 0 and open_checks["mesh"]["level"] != "ok")
+_, two_health, two_checks, _ = inspect(numpy.concatenate([box(10, 10, 10), box(10, 10, 10, (30, 0, 0))]))
+check("preflight: two bodies", two_health["bodies"] == 2 and two_checks["bodies"]["level"] == "warn")
+_, _, thin_checks, _ = inspect(box(30, 0.5, 30))
+check("preflight: thin wall", thin_checks["walls"]["level"] == "warn" and "0.5" in thin_checks["walls"]["text"],
+      thin_checks["walls"]["text"])
+inverted, _, inverted_checks, _ = inspect(box(20, 20, 20)[:, [0, 2, 1]])
+check("preflight: inverted normals fixed and reported", inverted["inverted"] and "normals" in inverted_checks)
+
+solid = G.analyze(tube(20, 0, 10, segments=256).reshape(-1, 3))
+outside = G.volume_outside_radius(solid["triangles"], solid["normals"], solid["areas"],
+                                  numpy.array([0.0, 1.0, 0.0]), numpy.zeros(3), 10.0)
+check("volume outside base radius", abs(outside - math.pi * (400 - 100) * 10) / (math.pi * 300 * 10) < 0.01, "%.1f" % outside)
+
+roller, _, roller_checks, roller_5d = inspect(tube(20, 10, 40), load="torsion")
+check("5D: shaft sleeve under torsion", roller_5d["verdict"] == "5d" and roller_5d["mode"] == "cylindrical_full"
+      and 19.8 <= roller_5d["base_diameter_mm"] <= 20.0 and roller_5d["evidence"], str(roller_5d["score"]))
+check("preflight: bore tolerance IT12", roller_checks["hole"]["level"] == "info" and "0.21" in roller_checks["hole"]["text"])
+_, _, _, disc_5d = inspect(tube(40, 5, 6), load="bending")
+check("5D: thin disc under bending -> 3D", disc_5d["verdict"] == "3d", str(disc_5d["factors"]))
+_, _, _, soft_5d = inspect(tube(20, 10, 40), flexible=True)
+check("5D: flexible material blocked", soft_5d["verdict"] == "3d" and soft_5d["blockers"])
+_, _, _, plate_5d = inspect(box(40, 5, 25))
+check("5D: no axis blocked", plate_5d["verdict"] == "3d" and any("оси" in b for b in plate_5d["blockers"]))
+check("5D: base without bore 6–10 mm", V.base_diameter({"through_bore": False, "bore_diameter": 0,
+                                                         "outer_diameter": 100})[0] == 10.0)
+
+# ---------------- паспорт рецепта ----------------
+pdir = tempfile.mkdtemp()
+model_file = gcode("model.stl", "solid t\nendsolid t\n")
+state = {"printer": "Stereotech Hybrid 530 V5.2.4", "printer_definition": "hte530", "slicer_version": "7.10.12",
+         "printing_mode": "classic", "printing_mode_label": "3D", "quality": "Normal", "quality_type": "normal",
+         "material": {"id": "enduse_pa6", "name": "Enduse PA6", "brand": "Stereotech", "density": 1.14},
+         "nozzle": "0.4", "objects": [{"name": "Колесо", "size_mm": {"x": 40, "y": 40, "z": 40}, "scale_percent": 100}],
+         "settings": [{"key": "wall_line_count", "label": "Wall Line Count", "value": 5, "unit": ""}],
+         "result": {"print_time": "2 ч 05 мин", "total_weight_g": 48.3}}
+record = P.build(state, model_path=model_file, analysis={"preflight": {"checks": list(roller_checks.values())},
+                                                         "five_axis": roller_5d},
+                 plan={"orientation": "min_supports"},
+                 rationale={"mode": "так быстрее", "wall_line_count": "нагрузка на кручение"},
+                 gcode_path=good and gcode("good2.gcode", "G1 X1\n"), gcode_check=good, project_path=None,
+                 context={"llm_model": "mock-gemma", "task": "Колесо конвейера, PA6"})
+paths = P.write(pdir, record)
+markdown = open(paths["markdown"], encoding="utf-8").read()
+saved = json.load(open(paths["json"], encoding="utf-8"))
+check("passport: files written", saved["format"] == "ste-ai-recipe/1" and saved["status"].startswith("черновик"))
+check("passport: hashes", saved["part"]["model"]["sha256"] == hashlib.sha256(open(model_file, "rb").read()).hexdigest())
+check("passport: rationale in settings", saved["settings"][0]["why"] == "нагрузка на кручение"
+      and saved["rationale"] == {"mode": "так быстрее"})
+check("passport: mode differs from advice noted", any("5D-советника" in n for n in saved["notes"]), str(saved["notes"]))
+check("passport: markdown sections", all(s in markdown for s in ("## Решения", "## 5D-советник", "## Изменённые настройки",
+                                                                 "## Заполняет технолог", "mock-gemma", "Колесо конвейера")))
 
 print("\n%d/%d checks passed" % (sum(checks), len(checks)))
 sys.exit(0 if all(checks) else 1)

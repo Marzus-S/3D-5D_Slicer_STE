@@ -190,6 +190,156 @@ def revolution_info(triangles, areas):
     }
 
 
+def mesh_health(triangles, max_triangles_for_bodies=2000000):
+    """Целостность сетки: открытые рёбра (дыры), рёбра с тремя и больше гранями, число отдельных тел.
+    STL хранит каждый треугольник отдельно, поэтому вершины сначала «свариваем» по координатам."""
+    points = numpy.round(triangles.reshape(-1, 3) / 1e-4).astype(numpy.int64)
+    _, ids = numpy.unique(points, axis=0, return_inverse=True)
+    ids = ids.reshape(-1, 3)
+    edges = numpy.concatenate([ids[:, [0, 1]], ids[:, [1, 2]], ids[:, [2, 0]]])
+    edges.sort(axis=1)
+    _, counts = numpy.unique(edges, axis=0, return_counts=True)
+    result = {
+        "open_edges": int((counts == 1).sum()),
+        "nonmanifold_edges": int((counts > 2).sum()),
+        "bodies": None,
+    }
+    result["watertight"] = result["open_edges"] == 0 and result["nonmanifold_edges"] == 0
+    if len(triangles) <= max_triangles_for_bodies:
+        result["bodies"] = _component_count(int(ids.max()) + 1, edges)
+    return result
+
+
+def _component_count(count, edges):
+    """Число связных компонент: «подвешивание» к меньшему номеру + сжатие путей (за log шагов, без Python-циклов по рёбрам)."""
+    parent = numpy.arange(count)
+    a, b = edges[:, 0], edges[:, 1]
+    for _ in range(64):
+        pa, pb = parent[a], parent[b]
+        if (pa == pb).all():
+            break
+        numpy.minimum.at(parent, numpy.maximum(pa, pb), numpy.minimum(pa, pb))
+        while True:
+            jumped = parent[parent]
+            if (jumped == parent).all():
+                break
+            parent = jumped
+    return int(len(numpy.unique(parent)))
+
+
+def wall_thickness(triangles, normals, areas, samples=200, limit=5.0, seed=0):
+    """Толщина стенки в случайных точках поверхности (с учётом площади): луч от грани внутрь до
+    противоположной стенки. Возвращает массив толщин; inf — стенка толще limit или луч не нашёл выхода."""
+    if len(triangles) == 0:
+        return numpy.zeros(0)
+    random = numpy.random.RandomState(seed)
+    picked = random.choice(len(triangles), size=min(samples, len(triangles)), p=areas / areas.sum())
+    centers = triangles.mean(axis=1)
+    reach = numpy.sqrt(((triangles - centers[:, None, :]) ** 2).sum(axis=2)).max(axis=1)
+    result = numpy.full(len(picked), numpy.inf)
+    for n, face in enumerate(picked):
+        direction = -normals[face]
+        origin = centers[face] + direction * 1e-3
+        # Только грани, до которых от точки не дальше limit: остальные заведомо не дадут тонкую стенку.
+        near = numpy.sqrt(((centers - origin) ** 2).sum(axis=1)) - reach <= limit
+        near[face] = False
+        hits = _ray_distances(triangles[near], origin, direction)
+        hits = hits[(hits > 1e-3) & (hits <= limit)]
+        if len(hits):
+            result[n] = float(hits.min()) + 1e-3
+    return result
+
+
+def _ray_distances(triangles, origin, direction):
+    """Расстояния вдоль луча до пересекаемых треугольников (Möller–Trumbore); без пересечения — -1."""
+    if len(triangles) == 0:
+        return numpy.zeros(0)
+    v0 = triangles[:, 0]
+    e1 = triangles[:, 1] - v0
+    e2 = triangles[:, 2] - v0
+    p = numpy.cross(direction, e2)
+    det = (e1 * p).sum(axis=1)
+    ok = numpy.abs(det) > 1e-12
+    inv = numpy.zeros_like(det)
+    inv[ok] = 1.0 / det[ok]
+    s = origin - v0
+    u = (s * p).sum(axis=1) * inv
+    q = numpy.cross(s, e1)
+    v = q.dot(direction) * inv
+    t = (e2 * q).sum(axis=1) * inv
+    hit = ok & (u >= 0.0) & (v >= 0.0) & (u + v <= 1.0)
+    return numpy.where(hit, t, -1.0)
+
+
+def _radial(points, center, axis):
+    relative = points - center
+    radial = relative - numpy.outer(relative.dot(axis), axis)
+    return radial, numpy.sqrt((radial ** 2).sum(axis=1))
+
+
+def volume_outside_radius(triangles, normals, areas, axis, center, radius):
+    """Объём материала дальше radius от оси. Теорема Гаусса–Остроградского для поля
+    F = (r² − R²) / (2r) · r̂ при r > R и 0 внутри: div F = 1 снаружи цилиндра, поэтому поток F через
+    поверхность детали равен объёму вне цилиндра. Интеграл по грани — по серединам рёбер."""
+    total = 0.0
+    for i, j in ((0, 1), (1, 2), (2, 0)):
+        midpoints = (triangles[:, i] + triangles[:, j]) * 0.5
+        radial, r = _radial(midpoints, center, axis)
+        safe = numpy.maximum(r, 1e-9)
+        field = numpy.where(r > radius, (r ** 2 - radius ** 2) / (2.0 * safe ** 2), 0.0)
+        total += float(((radial * normals).sum(axis=1) * field * areas).sum())
+    return abs(total) / 3.0
+
+
+def radial_overhang_share(triangles, normals, areas, axis, center, start_radius, overhang_angle=DEFAULT_OVERHANG_ANGLE):
+    """Доля поверхности, которой в 5D нужна поддержка: в цилиндрических слоях деталь растёт от оси наружу,
+    и «нависают» грани, смотрящие к оси (как в 3D — грани, смотрящие вниз). Грани у базы не считаем."""
+    radial, r = _radial(triangles.mean(axis=1), center, axis)
+    unit = radial / numpy.maximum(r, 1e-9)[:, None]
+    facing_axis = (normals * unit).sum(axis=1) < -math.sin(math.radians(overhang_angle))
+    mask = facing_axis & (r > start_radius + 0.5)
+    total = float(areas.sum())
+    return 100.0 * float(areas[mask].sum()) / total if total else 0.0
+
+
+def trapped_overhang_share(triangles, normals, areas, down, axis, overhang_angle=DEFAULT_OVERHANG_ANGLE,
+                           samples=200, seed=0):
+    """Доля поверхности (%), которой в 3D-ориентации down нужна поддержка, стоящая на самой детали
+    (луч вниз упирается в деталь: каналы, полости между дисками), и при этом грань смотрит вдоль оси —
+    в цилиндрических слоях 5D такая грань идёт как стенка и поддержки не требует."""
+    down = numpy.asarray(down, dtype=numpy.float64)
+    down = down / numpy.linalg.norm(down)
+    heights = triangles.dot(-down)
+    near_bed = heights.min(axis=1) <= heights.min() + 0.3
+    overhang = (normals.dot(-down) < -math.sin(math.radians(overhang_angle))) & ~near_bed
+    overhang &= numpy.abs(normals.dot(axis)) >= math.cos(math.radians(30))
+    candidates = numpy.nonzero(overhang)[0]
+    total = float(areas.sum())
+    if len(candidates) == 0 or not total:
+        return 0.0
+    random = numpy.random.RandomState(seed)
+    weights = areas[candidates] / areas[candidates].sum()
+    picked = random.choice(candidates, size=min(samples, len(candidates)), p=weights)
+    # Луч идёт вдоль down: отбираем треугольники, чья проекция на плоскость, перпендикулярную лучу, накрывает точку.
+    helper = numpy.array([1.0, 0.0, 0.0]) if abs(down[0]) < 0.9 else numpy.array([0.0, 1.0, 0.0])
+    u = numpy.cross(down, helper)
+    u /= numpy.linalg.norm(u)
+    v = numpy.cross(down, u)
+    tu, tv = triangles.dot(u), triangles.dot(v)
+    lo_u, hi_u, lo_v, hi_v = tu.min(axis=1), tu.max(axis=1), tv.min(axis=1), tv.max(axis=1)
+    centers = triangles.mean(axis=1)
+    trapped = 0
+    for face in picked:
+        origin = centers[face]
+        pu, pv = float(origin.dot(u)), float(origin.dot(v))
+        mask = (lo_u <= pu) & (hi_u >= pu) & (lo_v <= pv) & (hi_v >= pv)
+        mask[face] = False
+        hits = _ray_distances(triangles[mask], origin, down)
+        if (hits > 1e-3).any():
+            trapped += 1
+    return 100.0 * float(areas[candidates].sum()) / total * trapped / len(picked)
+
+
 def analyze(vertices, indices=None, overhang_angle=DEFAULT_OVERHANG_ANGLE):
     triangles = triangles_from_mesh(vertices, indices)
     triangles, normals, areas = face_data(triangles)
@@ -198,7 +348,10 @@ def analyze(vertices, indices=None, overhang_angle=DEFAULT_OVERHANG_ANGLE):
 
     points = triangles.reshape(-1, 3)
     size = points.max(axis=0) - points.min(axis=0)
-    volume = abs(float(numpy.einsum("ij,ij->i", triangles[:, 0], numpy.cross(triangles[:, 1], triangles[:, 2])).sum())) / 6.0
+    signed = float(numpy.einsum("ij,ij->i", triangles[:, 0], numpy.cross(triangles[:, 1], triangles[:, 2])).sum()) / 6.0
+    if signed < 0:
+        normals = -normals  # сетка вывернута (или зеркальный масштаб): нормали должны смотреть наружу
+    volume = abs(signed)
 
     current = orientation_metrics(triangles, normals, areas, -UP, overhang_angle)
     candidates = [orientation_metrics(triangles, normals, areas, d, overhang_angle) for d in candidate_downs(normals, areas)]
@@ -213,6 +366,7 @@ def analyze(vertices, indices=None, overhang_angle=DEFAULT_OVERHANG_ANGLE):
         "triangle_count": int(len(triangles)),
         "size": size,
         "volume_mm3": volume,
+        "inverted": signed < 0,
         "surface_mm2": float(areas.sum()),
         "current": current,
         "by_supports": by_supports,

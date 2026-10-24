@@ -243,6 +243,7 @@ class Agent:
             messages.append(self._user_message(text, files))
             settings = self._settings_provider()
             model = settings.get("model") or self._auto_model(settings)
+            self._tools.run_context = {"llm_model": model, "mode": mode, "task": _first_user_text(messages)}
             tools_schema = self._registry.llm_tools()
             self._tools.watcher.progress_callback = self._on_progress
             self._tools.cancel_check = lambda: self._cancel
@@ -383,13 +384,22 @@ class Agent:
         if ok and name in ("slice", "get_slice_result") and isinstance(payload, dict) and payload.get("print_time"):
             self._events.add("slice_result", print_time=payload.get("print_time"),
                             weight=payload.get("total_weight_g"), mode=payload.get("printing_mode"))
-        if ok and name in ("export_gcode", "save_project") and isinstance(payload, dict):
+        if ok and name in ("export_gcode", "save_project", "save_passport") and isinstance(payload, dict):
             self._events.add("file_saved", kind=name, path=payload.get("path"))
         if ok and name == "apply_plan" and isinstance(payload, dict):
             self._events.add("slice_result", print_time=payload.get("print_time"),
                              weight=payload.get("total_weight_g"), mode=payload.get("printing_mode"))
             self._events.add("file_saved", kind="export_gcode", path=payload.get("gcode_path"))
             self._events.add("file_saved", kind="save_project", path=payload.get("project_path"))
+            if payload.get("passport_path"):
+                self._events.add("file_saved", kind="save_passport", path=payload.get("passport_path"))
+        if ok and name == "analyze_model" and isinstance(payload, dict) and payload.get("preflight"):
+            advice = payload.get("five_axis") or {}
+            self._events.add("preflight", checks=[{"level": c["level"], "text": c["text"]}
+                                                  for c in payload["preflight"]["checks"]],
+                             verdict=advice.get("verdict"), score=advice.get("score"),
+                             base=advice.get("base_diameter_mm"), blockers=advice.get("blockers") or [],
+                             decide=advice.get("decide"))
 
         text = json.dumps(payload, ensure_ascii=False)
         if len(text) > MAX_TOOL_RESULT_CHARS:
@@ -508,6 +518,14 @@ def _text_content(content):
 
 # qwen изредка вставляет в русский текст китайские слова («核心区 под нагруженный профиль»).
 _FOREIGN_SCRIPT = re.compile(r"[　-〿぀-ヿ㐀-䶿一-鿿가-힯＀-￯]+")
+
+
+def _first_user_text(messages):
+    """Исходная задача чата (первое сообщение пользователя) — для паспорта; без служебного списка вложений."""
+    for message in messages:
+        if message.get("role") == "user":
+            return _text_content(message.get("content")).split("\n\n[Приложены")[0].strip()
+    return ""
 
 
 def _strip_foreign_script(text):

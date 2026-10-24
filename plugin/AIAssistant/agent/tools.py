@@ -27,7 +27,7 @@ from UM.Scene.SceneNode import SceneNode
 from UM.Settings.SettingDefinition import SettingDefinition
 from UM.Settings.Validator import ValidatorState
 
-from . import geometry, knowledge
+from . import advisor, geometry, knowledge, passport
 from .mainthread import is_main_thread, run_on_main
 from .registry import ToolError
 
@@ -344,6 +344,20 @@ def _world_mesh(node):
     return vertices, indices
 
 
+def _advisor_context(node):
+    """Что советнику нужно из слайсера: масштаб модели, ширина линии, плотность материала, скорость и перекрытие 5D."""
+    global_stack = _global_stack()
+    extruder = _extruder(global_stack, 0)
+    properties = extruder.material.getMetaDataEntry("properties", {}) or {}
+    return {
+        "scale_percent": node.getScale().x * 100.0,
+        "line_width": _number(extruder.getProperty("line_width", "value")) or 0.4,
+        "density": _number(properties.get("density")),
+        "speed": _number(extruder.getProperty("speed_wall_0_cylindrical", "value")) or 30.0,
+        "overlap": _number(global_stack.getProperty("cylindrical_mode_overlap", "value")) or 0.0,
+    }
+
+
 class _BackendListener:
     """Держит сильную ссылку на обработчики: сигналы Uranium хранят слабые ссылки."""
 
@@ -449,6 +463,13 @@ class SlicerTools:
         self._output_dir_provider = output_dir_provider
         self.watcher = SliceWatcher()
         self.last_model_name = None
+        self.last_model_path = None
+        self.last_analysis = None    # предпечатная проверка и 5D-совет — для паспорта
+        self.last_gcode_path = None
+        self.last_gcode_check = None
+        self.last_project_path = None
+        self.last_plan = None        # ориентация и обоснования из apply_plan
+        self.run_context = {}        # агент кладёт сюда модель LLM и текст задачи
         self.cancel_check = None  # агент ставит функцию «нажали ли Стоп», чтобы прерывать долгие ожидания
 
     # ------------------------------------------------------------------ состояние
@@ -825,6 +846,9 @@ class SlicerTools:
                 pass
         time.sleep(0.5)
         self.last_model_name = os.path.splitext(os.path.basename(path))[0]
+        self.last_model_path = path
+        self.last_analysis = None
+        self.last_plan = None
         return {"loaded": path, "objects": run_on_main(self._objects)}
 
     def list_objects(self):
@@ -833,38 +857,43 @@ class SlicerTools:
     def _objects(self):
         return [_node_info(node, i) for i, node in enumerate(_scene_nodes())]
 
-    def analyze_model(self, object=None, overhang_angle=45):
+    def analyze_model(self, object=None, overhang_angle=45, load=None, flexible=False):
         node = run_on_main(_find_node, object)
         vertices, indices = run_on_main(_world_mesh, node)
+        context = run_on_main(_advisor_context, node)
         analysis = geometry.analyze(vertices, indices, float(overhang_angle or 45))
         revolution = analysis["revolution"]
         current = analysis["current"]
         best = analysis["by_supports"][0]
 
+        health = geometry.mesh_health(analysis["triangles"])
+        samples = 200 if analysis["triangle_count"] <= 200000 else 100
+        thickness = geometry.wall_thickness(analysis["triangles"], analysis["normals"], analysis["areas"], samples=samples)
+        preflight = advisor.preflight(analysis, health, thickness, context["scale_percent"], context["line_width"],
+                                      context["density"])
+        five_axis = advisor.five_axis(analysis, load, bool(flexible), context["speed"], context["overlap"],
+                                      context["density"])
+
         axial_ratio = revolution["length_along_axis"] / max(revolution["outer_diameter"], 1e-6)
         hints = []
-        if revolution["is_body_of_revolution"]:
-            bore = (", cylindrical_mode_base_diameter не больше ⌀%.1f мм отверстия" % revolution["bore_diameter"]
-                    if revolution["through_bore"] else "")
-            if axial_ratio >= 0.35:
-                hints.append("Тело вращения, длина вдоль оси = %.2f диаметра — кандидат на 5D (cylindrical_full) для "
-                             "жёсткого материала: ось вертикально по центру стола%s." % (axial_ratio, bore))
-            else:
-                hints.append("Плоский диск (длина вдоль оси = %.2f диаметра) — обычно 3D, осью вертикально, "
-                             "рабочие элементы (зубья, лопасти) в плоскости стола." % axial_ratio)
-        elif revolution["axis_parallel_share"] >= 0.55:
-            hints.append("Деталь вытянута вдоль выраженной оси (вал, кулачок, ось). Если она вращается или работает "
-                         "на кручение и скольжение по профилю — кандидат на 5D (cylindrical_full), ось вертикально.")
         if current["overhang_percent"] > best["overhang_percent"] + 2:
             hints.append("Поворот уменьшит нависания с %.1f%% до %.1f%% площади (orient_model goal=min_supports)."
                          % (current["overhang_percent"], best["overhang_percent"]))
         if best["overhang_percent"] < 1.0:
             hints.append("Есть ориентация, в которой модель печатается практически без поддержек.")
+        if not preflight["ok"]:
+            hints.append("Предпечатная проверка нашла ошибки (preflight, level=fail): сначала исправь их или спроси "
+                         "пользователя, потом нарезай. Готовое исправление — в поле fix.")
 
+        self.last_analysis = OrderedDict([("object", node.getName()), ("model_path", self.last_model_path),
+                                          ("preflight", preflight), ("five_axis", five_axis)])
         return {
             "object": node.getName(),
             "size_mm": geometry.size_to_printer(analysis["size"]),
             "volume_cm3": round(analysis["volume_mm3"] / 1000.0, 2),
+            "triangles": analysis["triangle_count"],
+            "preflight": preflight,
+            "five_axis": five_axis,
             "overhang_angle_deg": float(overhang_angle or 45),
             "current_orientation": geometry.format_metrics(current),
             "best_for_no_supports": [geometry.format_metrics(m) for m in analysis["by_supports"][:2]],
@@ -1111,10 +1140,11 @@ class SlicerTools:
         result = {"path": target}
         result.update(_check_gcode(target, run_on_main(_gcode_limits)))
         self.last_gcode_path = target
+        self.last_gcode_check = result
         return result
 
     def validate_gcode(self, path=None):
-        path = path or getattr(self, "last_gcode_path", None)
+        path = path or self.last_gcode_path
         if not path:
             raise ToolError("Нет пути: сначала export_gcode или передайте path")
         path = os.path.abspath(os.path.expanduser(str(path)))
@@ -1138,15 +1168,45 @@ class SlicerTools:
             ok = writer.write(stream, [root])
         if not ok:
             raise ToolError("Не удалось сохранить проект 3MF")
+        self.last_project_path = target
         return {"path": target, "size_kb": round(os.path.getsize(target) / 1024.0, 1)}
+
+    def save_passport(self, name=None, rationale=None):
+        """Паспорт рецепта рядом с G-code и 3MF: что, из чего и как напечатано, почему и чем проверено."""
+        if is_main_thread():
+            raise ToolError("save_passport нельзя вызывать из главного потока")
+        if not self.last_gcode_path:
+            raise ToolError("Сначала нарежьте и сохраните G-code (apply_plan или export_gcode)")
+        reasons = OrderedDict((self.last_plan or {}).get("rationale") or {})
+        if isinstance(rationale, dict):
+            reasons.update((str(k), str(v)) for k, v in rationale.items() if v)
+        state = run_on_main(_passport_state)
+        state["result"] = run_on_main(self._slice_result)
+        record = passport.build(
+            state=state,
+            model_path=self.last_model_path,
+            analysis=self.last_analysis,
+            plan=self.last_plan,
+            rationale=reasons,
+            gcode_path=self.last_gcode_path,
+            gcode_check=self.last_gcode_check,
+            project_path=self.last_project_path,
+            context=self.run_context,
+        )
+        target = self._target_path(name, None, "passport.json")
+        paths = passport.write(os.path.dirname(target), record)
+        return {"path": paths["markdown"], "json_path": paths["json"], "status": record["status"],
+                "notes": record["notes"]}
 
     # ------------------------------------------------------------------ конвейер
 
     def apply_plan(self, printing_mode, material_id, quality_type=None, orientation="min_supports",
-                   settings=None, name=None, object=None):
-        """Применяет все решения разом и доводит проект до G-code и 3MF: меньше шагов — меньше шансов,
-        что модель застрянет в исследовании."""
+                   settings=None, name=None, object=None, rationale=None):
+        """Применяет все решения разом и доводит проект до G-code, 3MF и паспорта рецепта: меньше шагов —
+        меньше шансов, что модель застрянет в исследовании."""
         done = OrderedDict()
+        self.last_plan = {"orientation": orientation,
+                          "rationale": rationale if isinstance(rationale, dict) else {}}
         self.watcher.ensure_connected()
         try:
             done["reset"] = self.reset_settings()["reset"]
@@ -1172,8 +1232,15 @@ class SlicerTools:
             raise ToolError("План применён частично (%s), остановился на ошибке: %s"
                             % (", ".join(done.keys()) or "ничего", e))
         gcode = done["gcode"]
+        try:
+            record = self.save_passport(name=name)
+        except Exception as e:  # паспорт не должен ронять уже готовые G-code и 3MF
+            Logger.log("w", "[AIAssistant] Passport failed: %s", e)
+            record = {"error": "паспорт не сохранён: %s" % e}
         return {
             "applied": {k: v for k, v in done.items() if k not in ("slice", "gcode", "project")},
+            "passport_path": record.get("path"),
+            "passport_notes": record.get("notes") or record.get("error"),
             "print_time": done["slice"]["print_time"],
             "print_time_seconds": done["slice"]["print_time_seconds"],
             "total_weight_g": done["slice"]["total_weight_g"],
@@ -1287,6 +1354,53 @@ def _resolve_model_path(path):
         return by_name
     raise ToolError("Файл не найден: %s. Не подбирай пути наугад — попроси пользователя прикрепить модель "
                     "скрепкой в чате (вложения загружаются автоматически) или прислать полный путь." % raw)
+
+
+def _passport_state():
+    """Состояние слайсера для паспорта (главный поток): принтер, версии, профиль, материал, изменённые настройки."""
+    app = _app()
+    global_stack = _global_stack()
+    machine_manager = app.getMachineManager()
+    extruder = _extruder(global_stack, 0)
+    material = extruder.material
+    properties = material.getMetaDataEntry("properties", {}) or {}
+    settings, seen = [], set()
+    for stack in [global_stack] + _extruders(global_stack):
+        for key in sorted(stack.userChanges.getAllKeys()):
+            if key in seen:
+                continue
+            seen.add(key)
+            definition = _definition(global_stack, key)
+            settings.append(OrderedDict([
+                ("key", key),
+                ("label", _label(definition) if definition is not None else key),
+                ("value", _jsonable(stack.getProperty(key, "value"))),
+                ("unit", (definition.unit or "") if definition is not None else ""),
+            ]))
+    try:
+        version = app.getVersion()
+    except Exception:
+        version = None
+    mode = global_stack.getProperty("printing_mode", "value")
+    return {
+        "printer": global_stack.getName(),
+        "printer_definition": global_stack.definition.getName(),
+        "slicer_version": version,
+        "printing_mode": mode,
+        "printing_mode_label": PRINTING_MODES.get(mode, mode),
+        "quality": machine_manager.activeQualityOrQualityChangesName,
+        "quality_type": machine_manager.activeQualityType,
+        "material": OrderedDict([
+            ("id", material.getMetaDataEntry("base_file", material.getId())),
+            ("name", material.getName()),
+            ("brand", material.getMetaDataEntry("brand", "") or ""),
+            ("density", properties.get("density")),
+            ("description", " ".join((material.getMetaDataEntry("description", "") or "").split())[:300]),
+        ]),
+        "nozzle": extruder.variant.getName(),
+        "settings": settings,
+        "objects": [_node_info(n, i) for i, n in enumerate(_scene_nodes())],
+    }
 
 
 def _gcode_limits():
@@ -1444,9 +1558,17 @@ def register_tools(registry, tools):
                  "Список объектов: номер, имя, габариты (мм), положение центра, масштаб.",
                  {}, tools.list_objects)
     registry.add("analyze_model", "Анализ геометрии",
-                 "Анализ модели: габариты, объём, нависания в текущей и лучших ориентациях, площадь опоры, "
-                 "признаки тела вращения и сквозного отверстия (подсказка для 5D).",
-                 {"object": obj, "overhang_angle": {"type": "number", "default": 45}}, tools.analyze_model)
+                 "Анализ модели: предпечатная проверка (единицы, целостность сетки, тонкие стенки, отверстия, рабочая "
+                 "область), нависания и площадь опоры, тело вращения и отверстие, 5D-советник (five_axis): вердикт "
+                 "3D/5D по баллам с объяснением, диаметр базы. load — главная нагрузка из задачи, flexible — нужен "
+                 "гибкий материал.",
+                 {"object": obj, "overhang_angle": {"type": "number", "default": 45},
+                  "load": {"type": "string", "enum": list(advisor.LOADS.keys()),
+                           "description": "torsion — кручение, pressure — внутреннее давление, rolling — качение и "
+                                          "трение по поверхности, centrifugal — центробежная нагрузка на лопатки, "
+                                          "bending — изгиб зубьев и рычагов, static — статика или декор"},
+                  "flexible": {"type": "boolean", "default": False}},
+                 tools.analyze_model)
     registry.add("orient_model", "Авто-ориентация",
                  "Автоматически повернуть модель: min_supports — минимум нависаний; max_contact — максимум площади на столе; "
                  "axis_vertical — ось вращения вертикально и по центру стола (для 5D).",
@@ -1496,8 +1618,19 @@ def register_tools(registry, tools):
                   "settings": {"type": "object", "additionalProperties": True,
                                "description": "ключевые настройки, например {\"wall_line_count\": 5, \"infill_sparse_density\": 60}"},
                   "name": {"type": "string", "description": "имя папки результатов, например 01_gear"},
-                  "object": obj},
+                  "object": obj,
+                  "rationale": {"type": "object", "additionalProperties": True,
+                                "description": "обоснования для паспорта рецепта, коротко: {\"mode\": …, \"material\": …, "
+                                               "\"quality\": …, \"orientation\": …, \"<ключ настройки>\": …}"}},
                  tools.apply_plan, required=["printing_mode", "material_id"])
+    registry.add("save_passport", "Паспорт рецепта",
+                 "Сохранить паспорт рецепта (passport.md и passport.json рядом с G-code): решения и их обоснования, "
+                 "изменённые настройки, предпечатная проверка, 5D-совет, время и масса, SHA-256 файлов, поля для "
+                 "технолога. apply_plan делает это сам — вызывай после ручных правок и повторного экспорта.",
+                 {"name": {"type": "string", "description": "имя папки результатов"},
+                  "rationale": {"type": "object", "additionalProperties": True,
+                                "description": "обоснования: {\"mode\": …, \"<ключ настройки>\": …}"}},
+                 tools.save_passport)
     registry.add("compare_variants", "Сравнение вариантов",
                  "Нарезать 1–4 варианта настроек и сравнить время и расход материала. "
                  "Вариант: {label, quality_type?, material_id?, settings?}. Исходное состояние восстанавливается.",
