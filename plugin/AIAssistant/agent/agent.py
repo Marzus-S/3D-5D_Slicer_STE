@@ -294,6 +294,9 @@ class Agent:
                         warning = guard.check(call)
                         result_text = json.dumps({"error": warning}, ensure_ascii=False) if warning else self._execute(call)
                         guard.record(call, result_text)
+                        hint = guard.decision_hint()
+                        if hint and result_text.endswith("}"):
+                            result_text = result_text[:-1] + ', "hint": %s}' % json.dumps(hint, ensure_ascii=False)
                     messages.append({"role": "tool", "tool_call_id": call["id"], "content": result_text})
             else:
                 self._events.add("error", text="Достигнут лимит шагов (%d). Напишите «продолжай», чтобы агент закончил." % MAX_STEPS)
@@ -382,6 +385,11 @@ class Agent:
                             weight=payload.get("total_weight_g"), mode=payload.get("printing_mode"))
         if ok and name in ("export_gcode", "save_project") and isinstance(payload, dict):
             self._events.add("file_saved", kind=name, path=payload.get("path"))
+        if ok and name == "apply_plan" and isinstance(payload, dict):
+            self._events.add("slice_result", print_time=payload.get("print_time"),
+                             weight=payload.get("total_weight_g"), mode=payload.get("printing_mode"))
+            self._events.add("file_saved", kind="export_gcode", path=payload.get("gcode_path"))
+            self._events.add("file_saved", kind="save_project", path=payload.get("project_path"))
 
         text = json.dumps(payload, ensure_ascii=False)
         if len(text) > MAX_TOOL_RESULT_CHARS:
@@ -403,6 +411,7 @@ class _LoopGuard:
         self._last = None
         self._same = 0
         self._seen = {}
+        self._reads = 0
         self._fail_tool = None
         self._fails = 0
         self._warnings = 0
@@ -428,8 +437,18 @@ class _LoopGuard:
         self._last = signature
         if call["function"]["name"] in READ_ONLY_TOOLS:
             self._seen[signature] = self._seen.get(signature, 0) + 1
+            self._reads += 1
         else:
             self._seen = {}  # что-то изменили — повторное чтение снова имеет смысл
+            if call["function"]["name"] != "reset_settings":
+                self._reads = 0
+
+    def decision_hint(self):
+        """Модель долго только читает и ничего не применяет — подсказываем перейти к apply_plan."""
+        if self._reads >= 7:
+            return ("Данных уже достаточно. Хватит исследовать: прими решение и сразу вызови apply_plan "
+                    "(режим, материал, профиль, ориентация, ключевые настройки, name).")
+        return None
         failed = result_text.startswith('{"error"')
         if failed:
             name = call["function"]["name"]
