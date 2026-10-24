@@ -175,6 +175,10 @@ def five_axis(analysis, load=None, flexible=False, speed=30.0, overlap=0.0, dens
     elif revolution["axis_parallel_share"] >= 0.55 and revolution["symmetry"] >= 0.3:
         # Симметрия сечения отличает вал или ось со звёздами (≈0,5) от плоской пластины или бруска (≈0,04).
         factor(1, "выраженная ось: %d%% поверхности параллельно ей (вал, кулачок)" % round(100 * revolution["axis_parallel_share"]))
+    elif revolution["symmetry"] > 0.85:
+        # Шестерня, звёздочка: ось есть, но зубья рвут круглый контур.
+        blockers.append("ось есть, но контур не круглый (круглость %s: зубья, выступы) — цилиндрические слои не "
+                        "ложатся по форме детали" % _num(revolution["roundness"], 2))
     else:
         blockers.append("нет оси вращения — цилиндрические слои не ложатся по форме детали")
     if flexible:
