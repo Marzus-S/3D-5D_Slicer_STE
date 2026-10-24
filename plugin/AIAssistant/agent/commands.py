@@ -229,6 +229,48 @@ def cmd_saverecipe(run, args):
 
 
 SEVERITY_ICONS = {"ошибка": "⛔", "предупреждение": "⚠", "совет": "💡"}
+LOAD_ALIASES = {"кручение": "torsion", "давление": "pressure", "качение": "rolling", "центробежная": "centrifugal",
+                "изгиб": "bending", "статика": "static", "декор": "static"}
+VERDICTS = {"5d": "печатать в 5D", "3d": "печатать в 3D", "either": "подходят оба режима"}
+
+
+def cmd_analyze(run, args):
+    call = {}
+    for arg in args:
+        text = arg.lower()
+        if text in ("гибкая", "flexible", "tpu"):
+            call["flexible"] = True
+        else:
+            call["load"] = LOAD_ALIASES.get(text, text)
+    ok, payload = run("analyze_model", call)
+    if not ok:
+        return _error(payload)
+    preflight = payload.get("preflight") or {}
+    advice = payload.get("five_axis") or {}
+    lines = []
+    if advice.get("verdict"):
+        line = "**5D-советник: %s**" % VERDICTS.get(advice["verdict"], advice["verdict"])
+        if advice.get("score") is not None:
+            line += " (балл %s)" % advice["score"]
+        if advice.get("base_diameter_mm"):
+            line += ", база ⌀%s мм" % advice["base_diameter_mm"]
+        lines.append(line)
+        for blocker in advice.get("blockers") or []:
+            lines.append("- ✗ %s" % blocker)
+        for factor in sorted(advice.get("factors") or [], key=lambda f: -abs(f["points"]))[:3]:
+            lines.append("- %+d — %s" % (factor["points"], factor["why"]))
+        if advice.get("decide"):
+            lines.append(advice["decide"])
+        if advice.get("evidence"):
+            lines.append("*Выигрыш 5D: %s*" % advice["evidence"])
+    if preflight.get("summary"):
+        lines.append("\nПредпечатная проверка: %s" % preflight["summary"])
+    return "\n".join(lines) or "Анализ выполнен"
+
+
+def cmd_passport(run, args):
+    ok, payload = run("save_passport", {"name": args[0]} if args else {})
+    return "Паспорт рецепта: `%s`" % payload.get("path") if ok else _error(payload)
 
 
 def cmd_check(run, args):
@@ -272,6 +314,9 @@ COMMANDS = OrderedDict([
     ("recipes", (cmd_recipes, "/recipes", "список рецептов")),
     ("recipe", (cmd_recipe, "/recipe имя [папка]", "применить рецепт: настройки, нарезка, G-code и 3MF")),
     ("saverecipe", (cmd_saverecipe, "/saverecipe имя [описание]", "сохранить текущие настройки как рецепт")),
+    ("analyze", (cmd_analyze, "/analyze [нагрузка] [гибкая]",
+                 "предпечатная проверка и 5D-советник: кручение, давление, качение, изгиб…")),
+    ("passport", (cmd_passport, "/passport [папка]", "паспорт рецепта после ручных правок")),
     ("check", (cmd_check, "/check [decor|functional|loaded|sealed|flexible]", "разбор моих настроек")),
     ("quiz", (cmd_quiz, "/quiz [тема]", "проверить себя: вопросы с кнопками")),
 ])
