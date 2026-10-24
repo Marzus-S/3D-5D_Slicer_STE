@@ -1,105 +1,67 @@
 /* ===================== Темы оформления ===================== */
 
-/* Светлая: фиолетово-синяя гамма, светлый фон */
+/* Светлая: фиолетово-синяя гамма, приглушённый фон без чисто белого — меньше бликов при долгой работе */
 :root, [data-theme="studio"] {
   --font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
   --mono: Consolas, "Cascadia Mono", monospace;
   --radius: 14px;
   --radius-sm: 9px;
-  --bg: #f3f3f8;
+  --bg: #ecedf3;
   --bg-pattern: none;
-  --panel: #ffffff;
-  --panel-2: #f6f5fb;
-  --text: #1b1c3a;
-  --muted: #676a85;
-  --line: #e3e2ee;
-  --brand: #2f3a8f;
-  --accent: #6656a8;
-  --accent-strong: #554594;
+  --panel: #f9f9fc;
+  --panel-2: #f1f1f7;
+  --text: #2a2c47;
+  --muted: #6c6e88;
+  --line: #dcdce8;
+  --brand: #3b4590;
+  --accent: #6a5ea6;
+  --accent-strong: #5b4f96;
   --accent-ink: #ffffff;
-  --accent-soft: #eeebf8;
-  --user: linear-gradient(135deg, #2f3a8f, #5b57a6);
-  --user-text: #ffffff;
-  --tool: #f8f8fc;
-  --code: #efeef7;
-  --ok: #2e8b6a;
-  --err: #c0392b;
-  --err-soft: #fdeceb;
-  --side-bg: linear-gradient(180deg, #252c6e 0%, #3a3580 60%, #563f8c 100%);
-  --side-text: #eeedf8;
-  --side-muted: #aeb0d6;
-  --side-hover: rgba(255, 255, 255, .08);
-  --side-active: rgba(124, 196, 245, .2);
-  --side-line: rgba(255, 255, 255, .12);
-  --shadow: 0 1px 2px rgba(42, 52, 136, .06), 0 6px 20px rgba(42, 52, 136, .08);
+  --accent-soft: #e9e6f3;
+  --user: linear-gradient(135deg, #3b4590, #5f5aa0);
+  --user-text: #f7f7fc;
+  --tool: #f3f3f8;
+  --code: #e8e8f1;
+  --ok: #2f8566;
+  --err: #b8483d;
+  --err-soft: #f7e7e5;
+  --side-bg: linear-gradient(180deg, #2d3370 0%, #3d3a79 60%, #504283 100%);
+  --side-text: #e9e9f4;
+  --side-muted: #a9abcc;
+  --side-hover: rgba(255, 255, 255, .07);
+  --side-active: rgba(156, 200, 240, .18);
+  --side-line: rgba(255, 255, 255, .1);
+  --shadow: 0 1px 2px rgba(42, 52, 136, .05), 0 4px 14px rgba(42, 52, 136, .06);
   --heading-font: var(--font);
 }
 
-/* Тёмная: та же гамма на глубоком сине-фиолетовом фоне */
+/* Тёмная: та же гамма, фон не чёрный и текст не белый — мягкий контраст для глаз */
 [data-theme="graphite"] {
-  --bg: #11122a;
-  --panel: #1a1b38;
-  --panel-2: #20223f;
-  --text: #e9e8f6;
-  --muted: #9a9bbd;
-  --line: #2c2e52;
-  --brand: #9cc8ff;
-  --accent: #8d7fe0;
-  --accent-strong: #a597f0;
-  --accent-ink: #120f2b;
-  --accent-soft: #2a2752;
-  --user: linear-gradient(135deg, #34408f, #5d4f9e);
-  --user-text: #f3f2fc;
-  --tool: #17183a;
-  --code: #262848;
-  --ok: #5fd1a1;
-  --err: #ff7b72;
-  --err-soft: #3a1d26;
-  --side-bg: linear-gradient(180deg, #0c0d22 0%, #151638 100%);
-  --side-text: #e2e2f3;
-  --side-muted: #8587ad;
+  --bg: #17182c;
+  --panel: #1e2036;
+  --panel-2: #24263d;
+  --text: #d7d7e6;
+  --muted: #9193ad;
+  --line: #303250;
+  --brand: #a9c4ee;
+  --accent: #8a80cc;
+  --accent-strong: #9d94d8;
+  --accent-ink: #15132b;
+  --accent-soft: #2c2a4c;
+  --user: linear-gradient(135deg, #3a4180, #584e92);
+  --user-text: #ecebf6;
+  --tool: #1b1d33;
+  --code: #2a2c47;
+  --ok: #6cc79f;
+  --err: #f08a82;
+  --err-soft: #3a2230;
+  --side-bg: linear-gradient(180deg, #121325 0%, #1a1b34 100%);
+  --side-text: #d9d9ea;
+  --side-muted: #8789aa;
   --side-hover: rgba(255, 255, 255, .05);
-  --side-active: rgba(141, 127, 224, .22);
-  --side-line: rgba(255, 255, 255, .07);
-  --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px rgba(0, 0, 0, .3);
-}
-
-/* Чертёж — инженерная, синяя калька с сеткой */
-[data-theme="blueprint"] {
-  --font: "Segoe UI", system-ui, Arial, sans-serif;
-  --heading-font: Consolas, "Cascadia Mono", monospace;
-  --radius: 4px;
-  --radius-sm: 3px;
-  --bg: #0d2c4e;
-  --bg-pattern:
-    linear-gradient(rgba(255, 255, 255, .055) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, .055) 1px, transparent 1px),
-    linear-gradient(rgba(255, 255, 255, .025) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, .025) 1px, transparent 1px);
-  --panel: rgba(9, 33, 60, .92);
-  --panel-2: rgba(255, 255, 255, .05);
-  --text: #e8f1ff;
-  --muted: #9db6d6;
-  --line: #2f5b8a;
-  --brand: #ffd166;
-  --accent: #ffd166;
-  --accent-strong: #ffdd8a;
-  --accent-ink: #2a1d00;
-  --accent-soft: rgba(255, 209, 102, .14);
-  --user: #1c5089;
-  --user-text: #f3f8ff;
-  --tool: rgba(5, 25, 48, .85);
-  --code: rgba(255, 255, 255, .08);
-  --ok: #7ee2a8;
-  --err: #ff8a80;
-  --err-soft: rgba(255, 138, 128, .14);
-  --side-bg: #08203b;
-  --side-text: #e1ecfb;
-  --side-muted: #8aa7c9;
-  --side-hover: rgba(255, 255, 255, .06);
-  --side-active: rgba(255, 209, 102, .16);
-  --side-line: rgba(255, 255, 255, .1);
-  --shadow: none;
+  --side-active: rgba(138, 128, 204, .2);
+  --side-line: rgba(255, 255, 255, .06);
+  --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 6px 18px rgba(0, 0, 0, .22);
 }
 
 /* ===================== База ===================== */
@@ -157,8 +119,8 @@ button:disabled { opacity: .45; cursor: default; }
   background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600;
 }
 .new-chat:hover { background: var(--accent-strong); }
-[data-theme="studio"] .new-chat { background: linear-gradient(135deg, #4a8fe0, #7a5fb8); border-color: transparent; }
-[data-theme="studio"] .new-chat:hover { background: linear-gradient(135deg, #3d7fcf, #6a50a8); }
+[data-theme="studio"] .new-chat { background: linear-gradient(135deg, #5a8bc9, #7766ad); border-color: transparent; }
+[data-theme="studio"] .new-chat:hover { background: linear-gradient(135deg, #4e7cb8, #67589c); }
 .side-label { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--side-muted); padding: 10px 18px 6px; }
 .chat-list { flex: 1; overflow-y: auto; padding: 0 8px 8px; }
 .chat-item {
@@ -374,10 +336,8 @@ textarea:focus, input:focus { outline: 2px solid var(--accent); outline-offset: 
 .swatch { width: 100%; height: 54px; border-radius: 7px; position: relative; overflow: hidden; display: block; margin-bottom: 4px; }
 .swatch i { position: absolute; left: 0; top: 0; bottom: 0; width: 30%; }
 .swatch b { position: absolute; right: 10%; bottom: 10px; width: 38%; height: 12px; border-radius: 6px; }
-.swatch-studio { background: #f3f3f8; } .swatch-studio i { background: linear-gradient(180deg, #252c6e, #563f8c); } .swatch-studio b { background: #6656a8; }
-.swatch-graphite { background: #1a1b38; } .swatch-graphite i { background: #0c0d22; } .swatch-graphite b { background: #8d7fe0; }
-.swatch-auto { background: linear-gradient(135deg, #f3f3f8 50%, #1a1b38 50%); } .swatch-auto i { background: linear-gradient(180deg, #252c6e, #0c0d22); } .swatch-auto b { background: #7cc4f5; }
-.swatch-blueprint { background: #0d2c4e linear-gradient(rgba(255,255,255,.12) 1px, transparent 1px) 0 0 / 8px 8px; } .swatch-blueprint i { background: #08203b; } .swatch-blueprint b { background: #ffd166; border-radius: 2px; }
+.swatch-studio { background: #ecedf3; } .swatch-studio i { background: linear-gradient(180deg, #2d3370, #504283); } .swatch-studio b { background: #6a5ea6; }
+.swatch-graphite { background: #1e2036; } .swatch-graphite i { background: #121325; } .swatch-graphite b { background: #8a80cc; }
 
 /* ===================== Узкий экран ===================== */
 @media (max-width: 860px) {
