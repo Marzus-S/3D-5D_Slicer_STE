@@ -20,4 +20,3 @@ Desktop.ini
 .idea/
 
 # G-code результатов слишком большой для GitHub (фигурка ~260 МБ) — кладём только в архив для сдачи
-results/**/result.gcode
