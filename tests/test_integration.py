@@ -80,6 +80,19 @@ class FakeApp:
     def getGlobalContainerStack(self):
         return None
 
+    def getController(self):
+        return FakeController()
+
+
+class FakeScene:
+    def getRoot(self):
+        return self
+
+
+class FakeController:
+    def getScene(self):
+        return FakeScene()
+
 
 APP = FakeApp()
 
@@ -141,7 +154,7 @@ for op in ("RemoveSceneNodeOperation", "RotateOperation", "ScaleOperation", "Tra
 module("UM.PluginRegistry", PluginRegistry=Stub)
 module("UM.Scene")
 module("UM.Scene.Iterator")
-module("UM.Scene.Iterator.DepthFirstIterator", DepthFirstIterator=Stub)
+module("UM.Scene.Iterator.DepthFirstIterator", DepthFirstIterator=lambda root: iter([root]))  # пустая сцена
 module("UM.Scene.SceneNode", SceneNode=Stub)
 module("UM.Settings")
 module("UM.Settings.SettingDefinition", SettingDefinition=Stub)
@@ -347,6 +360,11 @@ status, reset = call("/api/reset", {})
 check("reset opens new chat", reset.get("ok") is True and reset["session"] != first)
 
 from AIAssistant.agent import tools as T, agent as A
+# Модель кладём в папку загрузок чата: тест не зависит от того, лежат ли данные кейса в «Документах»
+fixture = os.path.join(tempfile.gettempdir(), "ste_ai_uploads", "data", "models", "1. Шестерня - 3D")
+os.makedirs(fixture, exist_ok=True)
+with open(os.path.join(fixture, "Шестерня.stl"), "wb") as f:
+    f.write(b"solid test\nendsolid test\n")
 found = T._resolve_model_path("data/models/1. Шестерня - 3D/Шестерня.stl")
 check("relative model path resolved", found.endswith("Шестерня.stl") and os.path.isfile(found), found)
 try:
