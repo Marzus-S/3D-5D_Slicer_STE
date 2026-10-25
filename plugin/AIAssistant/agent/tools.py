@@ -1032,10 +1032,12 @@ class SlicerTools:
         mode = run_on_main(lambda: _global_stack().getProperty("printing_mode", "value"))
         if timeout is None:
             # 5D-движок (Glicer) строит цилиндрические слои в разы дольше обычной нарезки.
-            timeout = 600 if mode == "classic" else 2400
-        # CuraEngine шлёт прогресс постоянно, а Glicer молчит до конца: 4 минуты тишины в 5D — это
-        # обычная работа, и ранний перезапуск обрывал нарезку по кругу.
-        stall_limit = 240 if mode == "classic" else 900
+            # Крыльчатка насоса в 5D режется около часа.
+            timeout = 600 if mode == "classic" else 5400
+        # CuraEngine шлёт прогресс постоянно, а Glicer молчит до самого конца, иногда дольше 15 минут.
+        # Перезапуск посреди работы Glicer роняет слайсер (IndexError в CylindricalBackend), поэтому в 5D
+        # «зависание» не ловим, ждём до общего таймаута.
+        stall_limit = 240 if mode == "classic" else None
         if self.watcher.ensure_connected():
             time.sleep(3.0)  # слежение только началось — недавних изменений мы не видели
         # Запускаем нарезку только когда настройки «осели» — иначе слайсер отменит её или упадёт.
@@ -1062,8 +1064,7 @@ class SlicerTools:
             if state == BackendState.Done:
                 break
             if state == BackendState.Error:
-                raise ToolError("Слайсинг завершился ошибкой. Проверьте, что модель внутри области печати "
-                                "и настройки без ошибок (get_settings покажет validation).")
+                raise ToolError("Слайсинг завершился ошибкой. " + run_on_main(_slice_error_reason))
             if state == BackendState.Disabled:
                 raise ToolError("Слайсинг недоступен: модель вне области печати или нет объектов для печати.")
             if state == BackendState.Processing:
@@ -1075,7 +1076,7 @@ class SlicerTools:
             cancelled = was_processing and state == BackendState.NotStarted
             silent = self.watcher.changes == 0 and now - last_start > 10
             # Движок слайсера иногда «замолкает» посреди нарезки: ни прогресса, ни смены состояния.
-            stalled = state == BackendState.Processing and now - max(self.watcher.last_activity, last_start) > stall_limit
+            stalled = stall_limit is not None and state == BackendState.Processing                 and now - max(self.watcher.last_activity, last_start) > stall_limit
             if stalled:
                 Logger.log("w", "[AIAssistant] Slicing stalled, restarting")
                 run_on_main(lambda: _app().getBackend().stopSlicing())
@@ -1446,6 +1447,27 @@ class SlicerTools:
         for stack, values in zip(stacks, snapshot["user"]):
             for key, value in values.items():
                 stack.userChanges.setProperty(key, "value", value)
+
+
+def _slice_error_reason():
+    """Почему слайсер отказался резать: без конкретной причины модель перебирает настройки наугад."""
+    outside = [n.getName() for n in _scene_nodes() if callable(getattr(n, "isOutsideBuildArea", None))
+               and n.isOutsideBuildArea()]
+    if outside:
+        return ("Объект вне области печати: %s. Вместе с каймой (brim), поддержками и запасом у края стола деталь "
+                "не помещается — поставь adhesion_type skirt или none, уменьши brim_width или поверни деталь."
+                % ", ".join(outside))
+    errors = []
+    global_stack = _global_stack()
+    for stack in [global_stack] + _extruders(global_stack):
+        for key in stack.userChanges.getAllKeys():
+            definition = _definition(global_stack, key)
+            if definition is not None and _validation(stack, definition) in ("Exception", "MinimumError",
+                                                                              "MaximumError", "Invalid"):
+                errors.append(key)
+    if errors:
+        return "Значения настроек вне допустимого диапазона: %s — исправь их (get_settings покажет границы)." %             ", ".join(sorted(set(errors)))
+    return "Проверь, что модель внутри области печати и настройки без ошибок (get_settings покажет validation)."
 
 
 def _resolve_model_path(path):
