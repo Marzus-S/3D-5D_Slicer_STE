@@ -556,10 +556,7 @@ class SlicerTools:
 
     def _set_quality(self, quality_type):
         groups = self._quality_groups()
-        group = groups.get(quality_type)
-        if group is None:
-            text = str(quality_type).strip().lower()
-            group = next((g for g in groups.values() if g.name.lower() == text), None)
+        group = _match_quality(groups, quality_type)
         if group is None:
             raise ToolError("Профиль «%s» не найден. Доступны: %s" % (
                 quality_type, ", ".join("%s (%s)" % (k, g.name) for k, g in groups.items() if g.is_available)))
@@ -1446,6 +1443,16 @@ class SlicerTools:
         for stack, values in zip(stacks, snapshot["user"]):
             for key, value in values.items():
                 stack.userChanges.setProperty(key, "value", value)
+
+
+def _match_quality(groups, wanted):
+    """Профиль по quality_type или имени. У Stereotech ключ и имя расходятся (normal — «Fine», high — «Extra Fine»),
+    и модель пишет имя ключом: extra_fine. Поэтому подчёркивания и дефисы считаем пробелами."""
+    if wanted in groups:
+        return groups[wanted]
+    norm = lambda text: " ".join(str(text).strip().lower().replace("_", " ").replace("-", " ").split())
+    text = norm(wanted)
+    return next((g for key, g in groups.items() if norm(key) == text or norm(g.name) == text), None)
 
 
 def _resolve_model_path(path):

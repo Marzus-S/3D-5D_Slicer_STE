@@ -639,6 +639,16 @@ finals = [e["text"] for e in evs if e["type"] == "assistant"]
 check("after plan: auto summary instead of loop", finals and "Итог собран автоматически" in finals[-1]
       and not any(e["type"] == "error" for e in evs) and executed == ["apply_plan"], str(executed))
 
+QualityGroup = type("QualityGroup", (), {})
+quality_groups = {}
+for key, name in (("high", "Extra Fine"), ("normal", "Fine"), ("extra coarse", "Extra Coarse")):
+    quality_groups[key] = QualityGroup()
+    quality_groups[key].name = name
+check("quality by name written as key", T._match_quality(quality_groups, "extra_fine").name == "Extra Fine"
+      and T._match_quality(quality_groups, "normal").name == "Fine"
+      and T._match_quality(quality_groups, "Extra-Coarse").name == "Extra Coarse"
+      and T._match_quality(quality_groups, "ultra") is None)
+
 # ---------------- журнал событий и отчёт для поддержки ----------------
 from AIAssistant.agent import journal as J
 jdir = tempfile.mkdtemp()
